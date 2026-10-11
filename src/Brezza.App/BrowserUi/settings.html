@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="internal.css">
+</head>
+<body class="internal-page" data-page="settings">
+    <div class="page">
+        <nav class="page-nav" data-i18n-aria-label="internal.nav">
+            <button class="nav-item" type="button" data-open="openSettings" aria-current="page" data-i18n="settings.title"></button>
+            <button class="nav-item" type="button" data-open="openHistory" data-i18n="history.title"></button>
+            <button class="nav-item" type="button" data-open="openBookmarks" data-i18n="bookmarks.title"></button>
+        </nav>
+        <main class="page-main">
+            <header class="page-header">
+                <div>
+                    <h1 data-i18n="settings.title"></h1>
+                    <p class="page-subtitle" data-i18n="settings.subtitle"></p>
+                </div>
+                <button id="close-page" class="button" type="button" data-close-page data-i18n="settings.close"></button>
+            </header>
+
+            <form id="settings-form" class="settings" novalidate>
+                <fieldset class="card">
+                    <legend class="card-title" data-i18n="settings.searchSection"></legend>
+                    <p class="card-hint" data-i18n="settings.searchHint"></p>
+                    <div id="search-presets" class="choice-list" role="radiogroup" data-i18n-aria-label="settings.searchSection"></div>
+                    <div id="custom-template" class="custom-template" hidden>
+                        <label for="search-template" data-i18n="settings.searchUrl"></label>
+                        <input id="search-template" type="url" spellcheck="false" required aria-describedby="template-hint error">
+                        <p id="template-hint" class="field-hint" data-i18n="settings.customHint"></p>
+                    </div>
+                </fieldset>
+
+                <fieldset class="card">
+                    <legend class="card-title" data-i18n="settings.languageSection"></legend>
+                    <p class="card-hint" data-i18n="settings.languageHint"></p>
+                    <label class="visually-hidden" for="language" data-i18n="settings.language"></label>
+                    <select id="language">
+                        <option value="" data-i18n="settings.languageSystem"></option>
+                        <option value="en" data-i18n="settings.languageEnglish"></option>
+                        <option value="zh-Hans" data-i18n="settings.languageChinese"></option>
+                    </select>
+                </fieldset>
+
+                <div class="form-footer">
+                    <p id="form-status" class="form-status" role="status" aria-live="polite">
+                        <span id="error" class="status-error"></span>
+                        <span id="saved" class="status-saved"></span>
+                    </p>
+                    <button id="reset-settings" class="button" type="button" data-i18n="settings.cancel" disabled></button>
+                    <button id="save-settings" class="button primary" type="submit" data-i18n="settings.save" disabled></button>
+                </div>
+            </form>
+        </main>
+    </div>
+    <script src="internal.js"></script>
+</body>
+</html>

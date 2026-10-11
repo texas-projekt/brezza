@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="internal.css">
+</head>
+<body class="internal-page" data-page="newtab">
+    <svg class="icon-sprite" aria-hidden="true" focusable="false">
+        <symbol id="i-private" viewBox="0 0 20 20"><path d="M3 9.5h14M5 9.5l1.3-4.2a1 1 0 0 1 1.2-.7l2.5.7 2.5-.7a1 1 0 0 1 1.2.7L15 9.5"/><circle cx="6.5" cy="13.5" r="2.2"/><circle cx="13.5" cy="13.5" r="2.2"/><path d="M8.7 13.2c.8-.5 1.8-.5 2.6 0"/></symbol>
+        <symbol id="i-brezza" viewBox="0 0 20 20"><path d="M4 12.5c2.5-1.6 5.4-1.6 8 0s5.1 1.6 4 0M4 8.5c2.5-1.6 5.4-1.6 8 0s4.6 1.4 4 .2"/></symbol>
+        <symbol id="i-search" viewBox="0 0 20 20"><circle cx="8.8" cy="8.8" r="5"/><path d="m12.6 12.6 4 4"/></symbol>
+    </svg>
+
+    <main class="newtab-page" data-i18n-aria-label="start.page">
+        <div class="newtab-content">
+            <div class="newtab-mark" aria-hidden="true">
+                <svg class="icon"><use id="newtab-mark-icon" href="#i-brezza"/></svg>
+            </div>
+            <h1 id="newtab-title" data-i18n="app.name"></h1>
+            <p id="newtab-subtitle" class="newtab-subtitle" data-i18n="start.subtitle"></p>
+            <button id="newtab-focus" class="newtab-search" type="button">
+                <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+                <span data-i18n="address.placeholder"></span>
+                <kbd>Ctrl+L</kbd>
+            </button>
+            <dl class="newtab-shortcuts">
+                <div><dt><kbd>Ctrl+T</kbd></dt><dd data-i18n="tab.newAction"></dd></div>
+                <div><dt><kbd>Ctrl+Shift+N</kbd></dt><dd data-i18n="tab.newPrivateAction"></dd></div>
+                <div><dt><kbd>Ctrl+D</kbd></dt><dd data-i18n="toolbar.bookmark"></dd></div>
+            </dl>
+        </div>
+    </main>
+    <script src="internal.js"></script>
+</body>
+</html>

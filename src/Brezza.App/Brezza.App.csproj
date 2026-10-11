@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>Brezza</AssemblyName>
+    <RootNamespace>Brezza.App</RootNamespace>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Brezza.Core\Brezza.Core.csproj" />
+    <ProjectReference Include="..\Brezza.WebView2\Brezza.WebView2.csproj" />
+    <ProjectReference Include="..\Brezza.Persistence\Brezza.Persistence.csproj" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" />
+    <Reference Include="System.Web" />
+    <Reference Include="System.Web.Extensions" />
+    <Content Include="BrowserUi\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

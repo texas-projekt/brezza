@@ -1,0 +1,370 @@
+/* Brezza browser chrome. The chrome is its own WebView2 surface and only owns the browser controls. */
+
+:root {
+    color-scheme: light dark;
+    --font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+
+    --strip: #f3f4f6;
+    --toolbar: #f3f4f6;
+    --canvas: #ffffff;
+    --surface: #ffffff;
+    --field: #e7e9ec;
+    --field-hover: #dfe2e6;
+    --text: #1a1f24;
+    --text-muted: #5d6873;
+    --text-faint: #8a949d;
+    --line: rgb(20 30 40 / 10%);
+    --hover: rgb(20 30 40 / 6%);
+    --pressed: rgb(20 30 40 / 11%);
+    --accent: #0f766e;
+    --accent-text: #0b5f58;
+    --accent-soft: rgb(15 118 110 / 12%);
+    --focus: #14928a;
+    --warning: #b45309;
+    --danger: #b42318;
+    --danger-soft: #fdf0ee;
+    --tab-active: #ffffff;
+
+    --strip-h: 40px;
+    --toolbar-h: 48px;
+    --radius: 8px;
+    --ease: cubic-bezier(.2, .7, .2, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --strip: #202124;
+        --toolbar: #202124;
+        --canvas: #18191b;
+        --surface: #26282b;
+        --field: #2e3034;
+        --field-hover: #35383c;
+        --tab-active: #35383c;
+        --text: #e7eaed;
+        --text-muted: #a3acb5;
+        --text-faint: #7b858e;
+        --line: rgb(255 255 255 / 9%);
+        --hover: rgb(255 255 255 / 7%);
+        --pressed: rgb(255 255 255 / 12%);
+        --accent: #3cc4b8;
+        --accent-text: #66d6cc;
+        --accent-soft: rgb(60 196 184 / 15%);
+        --focus: #4fd1c5;
+        --warning: #f0b45a;
+        --danger: #ff8a7a;
+        --danger-soft: rgb(255 120 100 / 12%);
+    }
+}
+
+/* Private browsing always uses its own dark violet palette so the mode is unmistakable. */
+body.private {
+    color-scheme: dark;
+    --strip: #241f38;
+    --toolbar: #241f38;
+    --canvas: #1b172b;
+    --surface: #2b2542;
+    --field: #332c4d;
+    --field-hover: #3b3357;
+    --tab-active: #3b3357;
+    --text: #ece9f7;
+    --text-muted: #b2abcc;
+    --text-faint: #857ea3;
+    --line: rgb(255 255 255 / 10%);
+    --hover: rgb(255 255 255 / 8%);
+    --pressed: rgb(255 255 255 / 13%);
+    --accent: #a78bfa;
+    --accent-text: #c4b5fd;
+    --accent-soft: rgb(167 139 250 / 18%);
+    --focus: #b9a3ff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    font-family: var(--font);
+    font-size: 13px;
+    color: var(--text);
+    background: var(--canvas);
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+button, input { font: inherit; color: inherit; }
+button { cursor: default; }
+input { -webkit-user-select: text; user-select: text; }
+
+:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 6px; }
+
+[hidden] { display: none !important; }
+
+.icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+.icon {
+    width: 18px;
+    height: 18px;
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.icon-button {
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    transition: background-color .12s var(--ease), color .12s var(--ease);
+}
+.icon-button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.icon-button:active:not(:disabled) { background: var(--pressed); }
+.icon-button:disabled { opacity: .38; }
+.icon-button.small { width: 26px; height: 26px; }
+.icon-button.small .icon { width: 15px; height: 15px; }
+
+.text-button {
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    font-size: 12px;
+    font-weight: 600;
+}
+.text-button:hover { background: var(--field-hover); }
+
+kbd {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--field);
+    color: var(--text-muted);
+    font: 11px/16px var(--font);
+    white-space: nowrap;
+}
+
+/* ---------- Layout ---------- */
+
+.chrome { display: flex; flex-direction: column; height: 100%; }
+
+.chrome-bar { flex: none; position: relative; z-index: 2; }
+
+/* ---------- Tab strip ---------- */
+
+.tabstrip {
+    display: flex;
+    align-items: flex-end;
+    height: var(--strip-h);
+    padding: 0 6px 0 8px;
+    background: var(--strip);
+}
+
+.tabs {
+    display: flex;
+    align-items: flex-end;
+    min-width: 0;
+    height: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+
+.tab {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 1 auto;
+    width: 220px;
+    min-width: 44px;
+    height: 30px;
+    margin: 0 2px 5px 0;
+    padding: 0 4px 0 10px;
+    border-radius: 6px;
+    color: var(--text-muted);
+    transition: background-color .12s var(--ease);
+}
+.tab:hover { background: var(--hover); color: var(--text); }
+.tab[aria-selected="true"] { background: var(--tab-active); color: var(--text); }
+.tab:focus-visible { outline-offset: -2px; border-radius: 6px; }
+
+.tab-icon {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    color: #fff;
+    background: var(--monogram, var(--text-faint));
+}
+.tab-icon .icon { width: 16px; height: 16px; }
+.tab-icon.glyph { background: transparent; color: var(--text-muted); }
+.tab.private-tab .tab-icon.glyph { color: var(--accent); }
+
+.tab-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 12px;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+}
+
+.tab-close {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    opacity: 0;
+}
+.tab-close .icon { width: 14px; height: 14px; stroke-width: 1.8; }
+.tab:hover .tab-close, .tab[aria-selected="true"] .tab-close, .tab-close:focus-visible { opacity: 1; }
+.tab-close:hover { background: var(--pressed); color: var(--text); }
+
+/* Narrow tabs keep only what identifies them (classes set from measured width in app.js). */
+.tab.narrow:not([aria-selected="true"]) .tab-close { display: none; }
+.tab.tiny { justify-content: center; padding: 0 6px; }
+.tab.tiny .tab-title { display: none; }
+
+.new-tab { align-self: center; margin-left: 2px; width: 30px; height: 30px; }
+
+.tabstrip-end {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: auto;
+    padding-left: 12px;
+    align-self: center;
+}
+#NewPrivateTabButton { width: 30px; height: 30px; }
+body.private #NewPrivateTabButton { color: var(--accent); }
+
+/* ---------- Toolbar ---------- */
+
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: var(--toolbar-h);
+    padding: 0 8px 4px;
+    background: var(--toolbar);
+    border-bottom: 1px solid var(--line);
+}
+
+.toolbar-group { display: flex; align-items: center; gap: 2px; }
+
+.omnibox {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 120px;
+    height: 36px;
+    margin: 0 6px;
+    padding: 0 3px 0 4px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: var(--field);
+    transition: background-color .12s var(--ease), border-color .12s var(--ease);
+}
+.omnibox:hover { background: var(--field-hover); }
+.omnibox:focus-within { border-color: var(--accent); background: var(--surface); }
+
+.site-indicator {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    color: var(--text-muted);
+}
+.site-indicator .icon { width: 16px; height: 16px; }
+.site-indicator[data-kind="insecure"] { color: var(--warning); }
+.site-indicator[data-kind="internal"] { color: var(--accent); }
+
+.omnibox-field { position: relative; flex: 1; min-width: 0; height: 100%; }
+
+#OmniBox {
+    width: 100%;
+    height: 100%;
+    padding: 0 8px 0 4px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    font-size: 14px;
+}
+#OmniBox::placeholder { color: var(--text-faint); }
+#OmniBox::selection { background: var(--accent-soft); }
+
+/* When not editing, the URL is shown formatted: host emphasised, the rest de-emphasised. */
+.omnibox-display {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    padding: 0 8px 0 4px;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 14px;
+    color: var(--text-muted);
+    pointer-events: none;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+}
+.omnibox-display .host { color: var(--text); }
+.omnibox-field.formatted #OmniBox { color: transparent; }
+.omnibox-field:not(.formatted) .omnibox-display { display: none; }
+
+.omnibox-action { width: 30px; height: 28px; }
+#bookmark[aria-pressed="true"] { color: var(--accent); }
+#bookmark[aria-pressed="true"] .icon { fill: currentColor; }
+
+/* ---------- Notice ---------- */
+
+.notice {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 36px;
+    padding: 4px 8px 4px 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--danger-soft);
+    color: var(--text);
+    font-size: 12.5px;
+}
+.notice-icon { width: 16px; height: 16px; color: var(--danger); }
+.notice-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+@media (max-width: 720px) {
+    .toolbar { gap: 2px; padding: 0 4px; }
+    .omnibox { margin: 0 2px; }
+    #bookmarks, #history { display: none; }
+}

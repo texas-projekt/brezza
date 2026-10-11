@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Brezza.App/Brezza.App.csproj" />
+    <Project Path="src/Brezza.Core/Brezza.Core.csproj" />
+    <Project Path="src/Brezza.Persistence/Brezza.Persistence.csproj" />
+    <Project Path="src/Brezza.WebView2/Brezza.WebView2.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Brezza.Core.Tests/Brezza.Core.Tests.csproj" />
+  </Folder>
+</Solution>
