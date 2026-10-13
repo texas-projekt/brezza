@@ -1,6 +1,6 @@
 # ADR 0002: Reuse Existing Browser Work
 
-- Status: Superseded by [ADR 0003](0003-webview2-rendered-chrome.md)
+- Status: Superseded by [ADR 0003](0003-webview2-rendered-chrome.md) for browser chrome and [ADR 0006](0006-unified-data-directory.md) for the data directory
 - Date: 2026-10-07
 
 ## Context
@@ -13,7 +13,7 @@ Adapt the following lessons into the new architecture:
 
 - From the C# Brezza prototype: classify URL versus search input in a pure, tested Core component; validate configurable search templates; deduplicate concurrent tab-host creation; test close/shutdown races with fake hosts.
 - From WebView2Browser: treat web content as untrusted, keep browser chrome isolated from content, use a dedicated WebView2 user-data profile, and translate engine callbacks behind an adapter.
-- Keep the new profile and data under `%LOCALAPPDATA%\Brezza.Next`; do not open or migrate the old `%LOCALAPPDATA%\Brezza` data automatically.
+- The earlier separate data-directory decision is superseded by ADR 0006; the current application uses `%LOCALAPPDATA%\Brezza` after the user-requested data reset.
 
 ## Consequences
 

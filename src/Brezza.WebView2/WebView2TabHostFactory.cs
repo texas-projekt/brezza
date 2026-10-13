@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -10,54 +12,133 @@ namespace Brezza.WebView2;
 
 public sealed class WebView2TabHostFactory : ITabHostFactory
 {
+    private static readonly TimeSpan CleanupBudget = TimeSpan.FromSeconds(6);
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(250);
+
     private readonly string _userDataRoot;
-    private readonly string? _trustedAssetsDirectory;
+    private readonly IntPtr _parentWindow;
+    private readonly string? _downloadsFolder;
     private Task<CoreWebView2Environment>? _normalEnvironmentTask;
     private Task<CoreWebView2Environment>? _privateEnvironmentTask;
     private string? _privateUserDataFolder;
 
-    public WebView2TabHostFactory(string userDataRoot, string? trustedAssetsDirectory = null)
+    /// <summary>Private profile folders that are not verified removed yet.</summary>
+    private readonly List<string> _pendingPrivateFolders = new();
+
+    /// <param name="parentWindow">Native window the WebView2 controllers are parented to.</param>
+    public WebView2TabHostFactory(string userDataRoot, IntPtr parentWindow, string? downloadsFolder = null)
     {
         _userDataRoot = userDataRoot;
-        _trustedAssetsDirectory = trustedAssetsDirectory;
+        _parentWindow = parentWindow;
+        _downloadsFolder = downloadsFolder;
     }
 
     public string? PrivateUserDataFolder => _privateUserDataFolder;
 
+    /// <summary>Folder downloads are written to; defaults to the user's Downloads folder.</summary>
+    public string DownloadsFolder =>
+        string.IsNullOrWhiteSpace(_downloadsFolder)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
+            : _downloadsFolder!;
+
     public async Task<ITabHost> CreateAsync(string tabId, BrowserSessionKind sessionKind)
     {
-        var environment = await GetEnvironmentAsync(sessionKind);
-        return await WebView2TabHost.CreateAsync(environment, _trustedAssetsDirectory, sessionKind == BrowserSessionKind.Private);
+        var environment = await GetEnvironmentAsync(sessionKind).ConfigureAwait(true);
+        var options = CreateControllerOptions(environment, sessionKind);
+        return WebView2TabHost.Create(environment, _parentWindow, options, DownloadsFolder);
     }
 
-    public async Task CleanupSessionAsync(BrowserSessionKind sessionKind)
+    public async Task<SessionCleanupResult> CleanupSessionAsync(BrowserSessionKind sessionKind)
     {
-        if (sessionKind != BrowserSessionKind.Private || _privateUserDataFolder is null) return;
-        var folder = _privateUserDataFolder;
-        _privateUserDataFolder = null;
-        _privateEnvironmentTask = null;
+        if (sessionKind != BrowserSessionKind.Private) return NothingToRemove(sessionKind);
 
-        var deadline = DateTime.UtcNow.AddSeconds(6);
-        while (Directory.Exists(folder) && DateTime.UtcNow < deadline)
+        var targets = new List<string>();
+        if (_privateUserDataFolder is not null)
         {
-            try
+            targets.Add(_privateUserDataFolder);
+            _privateUserDataFolder = null;
+            _privateEnvironmentTask = null;
+        }
+
+        targets.AddRange(_pendingPrivateFolders);
+        _pendingPrivateFolders.Clear();
+        if (targets.Count == 0) return NothingToRemove(sessionKind);
+
+        var deadline = DateTime.UtcNow + CleanupBudget;
+        var attempts = 0;
+        string? lastDetail = null;
+        var retryable = true;
+        foreach (var folder in targets)
+        {
+            while (Directory.Exists(folder) && DateTime.UtcNow < deadline)
             {
-                Directory.Delete(folder, recursive: true);
+                attempts++;
+                try
+                {
+                    Directory.Delete(folder, recursive: true);
+                    lastDetail = null;
+                    retryable = true;
+                }
+                catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+                {
+                    // The WebView2 process can still hold the profile right after its controllers close.
+                    lastDetail = exception.Message;
+                    retryable = true;
+                    await Task.Delay(RetryDelay).ConfigureAwait(true);
+                }
+                catch (Exception exception)
+                {
+                    lastDetail = exception.Message;
+                    retryable = false;
+                    break;
+                }
             }
-            catch (IOException)
+
+            if (Directory.Exists(folder))
             {
-                await Task.Delay(250).ConfigureAwait(true);
-            }
-            catch (UnauthorizedAccessException)
-            {
-                await Task.Delay(250).ConfigureAwait(true);
+                // Keep the path tracked until removal is verified, so a later attempt can retry it.
+                _pendingPrivateFolders.Add(folder);
             }
         }
 
-        var parent = Path.GetDirectoryName(folder);
-        if (!string.IsNullOrEmpty(parent) && Directory.Exists(parent) && !Directory.EnumerateFileSystemEntries(parent).Any())
+        RemoveEmptyParent();
+        var primary = targets[0];
+        if (_pendingPrivateFolders.Count == 0)
         {
-            Directory.Delete(parent);
+            return new SessionCleanupResult(sessionKind, SessionCleanupState.Completed, primary, attempts, lastDetail);
+        }
+
+        var state = retryable ? SessionCleanupState.Pending : SessionCleanupState.Failed;
+        return new SessionCleanupResult(sessionKind, state, primary, attempts, lastDetail);
+    }
+
+    private static SessionCleanupResult NothingToRemove(BrowserSessionKind sessionKind) =>
+        new(sessionKind, SessionCleanupState.Completed, string.Empty, 0, null);
+
+    private static CoreWebView2ControllerOptions CreateControllerOptions(CoreWebView2Environment environment, BrowserSessionKind sessionKind)
+    {
+        // The wrapper requires options for every controller; private mode is the only difference.
+        var options = environment.CreateCoreWebView2ControllerOptions();
+        if (sessionKind == BrowserSessionKind.Private)
+        {
+            options.IsInPrivateModeEnabled = true;
+        }
+
+        options.DefaultBackgroundColor = Color.White;
+        return options;
+    }
+
+    private void RemoveEmptyParent()
+    {
+        var container = Path.Combine(_userDataRoot, "PrivateSessions");
+        if (!Directory.Exists(container) || Directory.EnumerateFileSystemEntries(container).Any()) return;
+        try
+        {
+            Directory.Delete(container);
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            // The container is only a grouping directory; leaving it behind is not a data leak.
         }
     }
 

@@ -30,7 +30,7 @@ public sealed class SessionStore
             .Where(tab => !string.IsNullOrWhiteSpace(tab.Id) && ids.Add(tab.Id) && IsRestorableUrl(tab.Url))
             .Select(tab =>
             {
-                if (string.IsNullOrWhiteSpace(tab.Url)) tab.Url = NavigationInputParser.NewTabUrl;
+                if (string.Equals(tab.Url, "brezza://newtab", StringComparison.OrdinalIgnoreCase)) tab.Url = string.Empty;
                 return tab;
             })
             .ToList();
@@ -60,7 +60,9 @@ public sealed class SessionStore
         string.IsNullOrWhiteSpace(url) ||
         (Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
          (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeFile ||
-          NavigationInputParser.IsInternalPage(uri)));
+          NavigationInputParser.IsInternalPage(uri) ||
+          (string.Equals(uri.Scheme, "brezza", StringComparison.OrdinalIgnoreCase) &&
+           string.Equals(uri.Host, "newtab", StringComparison.OrdinalIgnoreCase))));
 
     [XmlRoot("session")]
     public sealed class BrowserSession

@@ -1,5 +1,4 @@
 using Brezza.Core.Tabs;
-using Brezza.Core.Navigation;
 using Brezza.Persistence;
 
 namespace Brezza.Core.Tests.Persistence;
@@ -89,7 +88,7 @@ public sealed class SessionStoreTests
     }
 
     [Fact]
-    public void Legacy_empty_tab_is_migrated_to_the_internal_new_tab_url()
+    public void Legacy_empty_tab_is_kept_as_an_empty_url()
     {
         using var directory = new TestDirectory();
         var path = Path.Combine(directory.Path, "session.xml");
@@ -97,7 +96,21 @@ public sealed class SessionStoreTests
             "<session schemaVersion=\"1\" activeTabId=\"new\"><tab id=\"new\"><url></url></tab></session>");
 
         var restored = new SessionStore(path).Load();
-        Assert.Equal(NavigationInputParser.NewTabUrl, restored.Tabs![0].Url);
+        Assert.Empty(restored.Tabs![0].Url);
+    }
+
+    [Fact]
+    public void Legacy_new_tab_url_is_migrated_to_an_empty_url()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "session.xml");
+        File.WriteAllText(path,
+            "<session schemaVersion=\"1\" activeTabId=\"new\"><tab id=\"new\"><url>brezza://newtab</url></tab></session>");
+
+        var restored = new SessionStore(path).Load();
+
+        var tab = Assert.Single(restored.Tabs!);
+        Assert.Empty(tab.Url);
     }
 
     private sealed class TestDirectory : IDisposable

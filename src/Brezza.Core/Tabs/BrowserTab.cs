@@ -5,6 +5,7 @@ public enum TabRuntimeState
     Dormant,
     Creating,
     Active,
+    Sleeping,
     Failed,
     Closing,
 }

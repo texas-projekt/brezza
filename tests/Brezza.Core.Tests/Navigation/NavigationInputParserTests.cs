@@ -41,7 +41,6 @@ public sealed class NavigationInputParserTests
     [InlineData("brezza://settings")]
     [InlineData("brezza://history")]
     [InlineData("brezza://bookmarks")]
-    [InlineData("brezza://newtab")]
     public void Recognizes_canonical_internal_pages(string input)
     {
         var target = new NavigationInputParser(Template).Parse(input);

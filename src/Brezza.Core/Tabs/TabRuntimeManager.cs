@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Brezza.Core.Abstractions;
 using Brezza.Core.Navigation;
@@ -14,12 +15,20 @@ public sealed class TabRuntimeManager
     private readonly Dictionary<string, ITabHost> _hosts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Task<ITabHost?>> _creating = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Task> _restoring = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTime> _lastActivatedUtc = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _navigationGeneration = new(StringComparer.Ordinal);
+    private SessionCleanupResult? _pendingPrivateCleanup;
+    private readonly SemaphoreSlim _privateCleanupGate = new(1, 1);
+    private const int MaximumLiveHosts = 8;
+    private static readonly TimeSpan DefaultInactiveSleepAfter = TimeSpan.FromMinutes(10);
+    private readonly TimeSpan _inactiveSleepAfter;
     private bool _disposed;
 
-    public TabRuntimeManager(TabRegistry registry, ITabHostFactory factory)
+    public TabRuntimeManager(TabRegistry registry, ITabHostFactory factory, TimeSpan? inactiveSleepAfter = null)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _factory = factory ?? throw new ArgumentNullException(nameof(factory));
+        _inactiveSleepAfter = inactiveSleepAfter ?? DefaultInactiveSleepAfter;
     }
 
     public ITabHost? ActiveHost { get; private set; }
@@ -28,10 +37,41 @@ public sealed class TabRuntimeManager
 
     public event EventHandler<TabNavigationCompletedEventArgs>? NavigationCompleted;
 
+    public event EventHandler<BrowserTab>? RuntimeChanged;
+
+    /// <summary>Raised after every private-session cleanup attempt, successful or not.</summary>
+    public event EventHandler<SessionCleanupResult>? PrivateCleanupCompleted;
+
+    /// <summary>A page in any tab asked the browser to open a new window.</summary>
+    public event EventHandler<PopupRequestedEventArgs>? PopupRequested;
+
+    /// <summary>A download started in any tab.</summary>
+    public event EventHandler<DownloadStartedEventArgs>? DownloadStarted;
+
+    /// <summary>A download changed state in any tab.</summary>
+    public event EventHandler<DownloadStatusChangedEventArgs>? DownloadStatusChanged;
+
+    /// <summary>A page in any tab asked for a capability.</summary>
+    public event EventHandler<PermissionRequestedEventArgs>? PermissionRequested;
+
+    /// <summary>The private-session cleanup that has not verified removal yet, if any.</summary>
+    public SessionCleanupResult? PendingPrivateCleanup => _pendingPrivateCleanup is { IsComplete: false } ? _pendingPrivateCleanup : null;
+
     public async Task ActivateAsync(string tabId, bool waitForNavigation = true)
     {
         if (_disposed) return;
         var tab = _registry.Activate(tabId);
+        _lastActivatedUtc[tabId] = DateTime.UtcNow;
+
+        if (string.IsNullOrWhiteSpace(tab.Url))
+        {
+            ActiveHost = null;
+            _registry.Update(tabId, state: TabRuntimeState.Active);
+            ActiveHostChanged?.Invoke(this, EventArgs.Empty);
+            RuntimeChanged?.Invoke(this, tab);
+            await SweepSleepAsync().ConfigureAwait(true);
+            return;
+        }
 
         var host = await EnsureHostAsync(tab).ConfigureAwait(true);
         if (host is null ||
@@ -45,13 +85,15 @@ public sealed class TabRuntimeManager
         ActiveHost = host;
         _registry.Update(tabId, state: TabRuntimeState.Active);
         ActiveHostChanged?.Invoke(this, EventArgs.Empty);
+        RuntimeChanged?.Invoke(this, tab);
+        await SweepSleepAsync().ConfigureAwait(true);
         if (!string.IsNullOrWhiteSpace(tab.Url) &&
             Uri.TryCreate(tab.Url, UriKind.Absolute, out var uri) &&
             !SourcesMatch(host.Source, uri))
         {
             var restoration = RestoreUrlAsync(tab, host, uri);
             if (waitForNavigation) await restoration.ConfigureAwait(true);
-            else ObserveNavigation(tab, restoration);
+            else ObserveNavigation(tab, restoration, NextGeneration(tabId));
         }
     }
 
@@ -91,7 +133,7 @@ public sealed class TabRuntimeManager
 
         if (sessionKind == BrowserSessionKind.Private && !_registry.HasSession(BrowserSessionKind.Private))
         {
-            await _factory.CleanupSessionAsync(BrowserSessionKind.Private).ConfigureAwait(true);
+            await CleanupPrivateSessionAsync().ConfigureAwait(true);
         }
     }
 
@@ -107,8 +149,75 @@ public sealed class TabRuntimeManager
         }
 
         var navigation = host.NavigateAsync(uri);
+        var generation = NextGeneration(tabId);
         if (waitForNavigation) await navigation.ConfigureAwait(true);
-        else ObserveNavigation(_registry.Find(tabId), navigation);
+        else ObserveNavigation(_registry.Find(tabId), navigation, generation);
+    }
+
+    public async Task ResetToNewTabAsync(string tabId)
+    {
+        if (_disposed || !_registry.Contains(tabId)) return;
+
+        var wasActive = _registry.ActiveTab?.Id == tabId;
+        if (wasActive) ActiveHost = null;
+
+        var creating = _creating.TryGetValue(tabId, out var pending) ? pending : null;
+        if (_hosts.TryGetValue(tabId, out var host))
+        {
+            _hosts.Remove(tabId);
+            host.Dispose();
+        }
+        else if (creating is not null)
+        {
+            var created = await creating.ConfigureAwait(true);
+            if (created is not null)
+            {
+                _hosts.Remove(tabId);
+                created.Dispose();
+            }
+        }
+
+        _restoring.Remove(tabId);
+        _navigationGeneration.Remove(tabId);
+        _lastActivatedUtc.Remove(tabId);
+        _registry.SetUrl(tabId, string.Empty);
+        _registry.Update(
+            tabId,
+            title: "New Tab",
+            state: wasActive ? TabRuntimeState.Active : TabRuntimeState.Dormant);
+        if (wasActive) ActiveHostChanged?.Invoke(this, EventArgs.Empty);
+        RuntimeChanged?.Invoke(this, _registry.Find(tabId));
+    }
+
+    /// <summary>
+    /// Releases a tab's content host without changing its logical URL. Used when a tab moves to a
+    /// browser-owned page that the shell renders itself, so no WebView2 surface is left behind.
+    /// </summary>
+    public async Task ReleaseHostAsync(string tabId)
+    {
+        if (_disposed || !_registry.Contains(tabId)) return;
+
+        var wasActive = _registry.ActiveTab?.Id == tabId;
+        if (wasActive) ActiveHost = null;
+
+        var creating = _creating.TryGetValue(tabId, out var pending) ? pending : null;
+        if (_hosts.TryGetValue(tabId, out var host))
+        {
+            _hosts.Remove(tabId);
+            host.Dispose();
+        }
+        else if (creating is not null)
+        {
+            var created = await creating.ConfigureAwait(true);
+            if (created is not null) created.Dispose();
+        }
+
+        _restoring.Remove(tabId);
+        _navigationGeneration.Remove(tabId);
+        _lastActivatedUtc.Remove(tabId);
+        _registry.Update(tabId, state: wasActive ? TabRuntimeState.Active : TabRuntimeState.Dormant);
+        if (wasActive) ActiveHostChanged?.Invoke(this, EventArgs.Empty);
+        RuntimeChanged?.Invoke(this, _registry.Find(tabId));
     }
 
     public void GoBack() => ActiveHost?.GoBack();
@@ -116,6 +225,50 @@ public sealed class TabRuntimeManager
     public void GoForward() => ActiveHost?.GoForward();
 
     public void Reload() => ActiveHost?.Reload();
+
+    /// <summary>
+    /// Releases an inactive tab host, but only when the host is eligible: not loading, not playing
+    /// audio, and not showing a full-screen element. Returns the outcome so the caller can report why
+    /// a tab was kept alive.
+    /// </summary>
+    public TabSleepOutcome SleepAsync(string tabId)
+    {
+        if (_disposed) return TabSleepOutcome.NoHost;
+        if (!_registry.Contains(tabId)) return TabSleepOutcome.UnknownTab;
+        if (_registry.ActiveTab?.Id == tabId) return TabSleepOutcome.ActiveTab;
+        if (!_hosts.TryGetValue(tabId, out var host)) return TabSleepOutcome.NoHost;
+
+        var decision = TabSleepPolicy.Evaluate(TabHostSignals.FromHost(host), isActiveTab: false);
+        if (decision != TabSleepOutcome.Released) return decision;
+
+        _registry.Update(tabId, state: TabRuntimeState.Sleeping);
+        _hosts.Remove(tabId);
+        _lastActivatedUtc.Remove(tabId);
+        host.Dispose();
+        RuntimeChanged?.Invoke(this, _registry.Find(tabId));
+        return TabSleepOutcome.Released;
+    }
+
+    public Task SweepSleepAsync()
+    {
+        if (_disposed || _hosts.Count <= MaximumLiveHosts) return Task.CompletedTask;
+
+        var cutoff = DateTime.UtcNow - _inactiveSleepAfter;
+        var candidates = _hosts.Keys
+            .Where(id => _registry.ActiveTab?.Id != id)
+            .Where(id => _lastActivatedUtc.TryGetValue(id, out var last) && last <= cutoff)
+            .OrderBy(id => _lastActivatedUtc[id])
+            .ToArray();
+
+        // Ineligible candidates are skipped instead of counting against the host budget.
+        foreach (var tabId in candidates)
+        {
+            if (_hosts.Count <= MaximumLiveHosts) break;
+            SleepAsync(tabId);
+        }
+
+        return Task.CompletedTask;
+    }
 
     public async Task ShutdownAsync()
     {
@@ -133,9 +286,42 @@ public sealed class TabRuntimeManager
         _hosts.Clear();
         _creating.Clear();
         _restoring.Clear();
+        _lastActivatedUtc.Clear();
+        _navigationGeneration.Clear();
         ActiveHost = null;
         ActiveHostChanged?.Invoke(this, EventArgs.Empty);
-        await _factory.CleanupSessionAsync(BrowserSessionKind.Private).ConfigureAwait(true);
+        await CleanupPrivateSessionAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>Retries a private-session cleanup that did not verify removal yet.</summary>
+    public async Task<SessionCleanupResult?> RetryPendingPrivateCleanupAsync()
+    {
+        if (_disposed || _registry.HasSession(BrowserSessionKind.Private) ||
+            _privateCleanupGate.CurrentCount == 0 ||
+            _pendingPrivateCleanup is null || _pendingPrivateCleanup.IsComplete) return null;
+        return await CleanupPrivateSessionAsync().ConfigureAwait(true);
+    }
+
+    private async Task<SessionCleanupResult> CleanupPrivateSessionAsync()
+    {
+        await _privateCleanupGate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            if (!_disposed && _registry.HasSession(BrowserSessionKind.Private))
+            {
+                return _pendingPrivateCleanup ??
+                    new SessionCleanupResult(BrowserSessionKind.Private, SessionCleanupState.Completed, string.Empty, 0, null);
+            }
+
+            var result = await _factory.CleanupSessionAsync(BrowserSessionKind.Private).ConfigureAwait(true);
+            _pendingPrivateCleanup = result;
+            PrivateCleanupCompleted?.Invoke(this, result);
+            return result;
+        }
+        finally
+        {
+            _privateCleanupGate.Release();
+        }
     }
 
     private Task<ITabHost?> EnsureHostAsync(BrowserTab tab)
@@ -177,12 +363,12 @@ public sealed class TabRuntimeManager
         }
     }
 
-    private void ObserveNavigation(BrowserTab tab, Task navigation)
+    private void ObserveNavigation(BrowserTab tab, Task navigation, int generation)
     {
-        _ = ObserveNavigationAsync(tab, navigation);
+        _ = ObserveNavigationAsync(tab, navigation, generation);
     }
 
-    private async Task ObserveNavigationAsync(BrowserTab tab, Task navigation)
+    private async Task ObserveNavigationAsync(BrowserTab tab, Task navigation, int generation)
     {
         try
         {
@@ -195,9 +381,19 @@ public sealed class TabRuntimeManager
         }
         catch
         {
-            _registry.Update(tab.Id, state: TabRuntimeState.Failed);
+            if (IsCurrentGeneration(tab.Id, generation)) _registry.Update(tab.Id, state: TabRuntimeState.Failed);
         }
     }
+
+    private int NextGeneration(string tabId)
+    {
+        var next = _navigationGeneration.TryGetValue(tabId, out var current) ? current + 1 : 1;
+        _navigationGeneration[tabId] = next;
+        return next;
+    }
+
+    private bool IsCurrentGeneration(string tabId, int generation) =>
+        _navigationGeneration.TryGetValue(tabId, out var current) && current == generation;
 
     private static bool SourcesMatch(string source, Uri uri)
     {
@@ -223,6 +419,16 @@ public sealed class TabRuntimeManager
             host.SourceChanged += (_, _) => _registry.Update(tab.Id, url: host.Source);
             host.TitleChanged += (_, _) => _registry.Update(tab.Id, title: host.Title);
             host.NavigationFailed += (_, _) => _registry.Update(tab.Id, state: TabRuntimeState.Failed);
+            host.PopupRequested += (_, args) =>
+            {
+                if (!_disposed && _registry.Contains(tab.Id))
+                {
+                    PopupRequested?.Invoke(this, new PopupRequestedEventArgs(args.TargetUrl, tab.SessionKind));
+                }
+            };
+            host.DownloadStarted += (_, args) => DownloadStarted?.Invoke(this, args);
+            host.DownloadStatusChanged += (_, args) => DownloadStatusChanged?.Invoke(this, args);
+            host.PermissionRequested += (_, args) => PermissionRequested?.Invoke(this, args);
             host.NavigationCompleted += (_, result) =>
             {
                 if (result.IsSuccess)

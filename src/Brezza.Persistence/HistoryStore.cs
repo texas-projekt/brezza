@@ -56,6 +56,14 @@ public sealed class HistoryStore
         }
     }
 
+    public bool Remove(string url)
+    {
+        var entry = _entries.FirstOrDefault(item => string.Equals(item.Url, url, StringComparison.OrdinalIgnoreCase));
+        return entry is not null && _entries.Remove(entry);
+    }
+
+    public void Clear() => _entries.Clear();
+
     public void Save()
     {
         AtomicXmlFile.Save(

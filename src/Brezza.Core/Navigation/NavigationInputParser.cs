@@ -5,7 +5,6 @@ namespace Brezza.Core.Navigation;
 public sealed class NavigationInputParser
 {
     public const string QueryPlaceholder = "{query}";
-    public const string NewTabUrl = "brezza://newtab";
 
     private readonly string _searchTemplate;
 
@@ -78,8 +77,7 @@ public sealed class NavigationInputParser
         string.Equals(uri.Scheme, "brezza", StringComparison.OrdinalIgnoreCase) &&
         (string.Equals(uri.Host, "settings", StringComparison.OrdinalIgnoreCase) ||
          string.Equals(uri.Host, "history", StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(uri.Host, "bookmarks", StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(uri.Host, "newtab", StringComparison.OrdinalIgnoreCase));
+         string.Equals(uri.Host, "bookmarks", StringComparison.OrdinalIgnoreCase));
 
     public static string GetCanonicalInternalUrl(Uri uri)
     {

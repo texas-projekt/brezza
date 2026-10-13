@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Brezza.Core.Navigation;
 
 namespace Brezza.Core.Tabs;
 
@@ -16,7 +15,7 @@ public sealed class TabRegistry
 
     public BrowserTab? ActiveTab { get; private set; }
 
-    public BrowserTab Create(string? initialUrl = NavigationInputParser.NewTabUrl, BrowserSessionKind sessionKind = BrowserSessionKind.Normal)
+    public BrowserTab Create(string? initialUrl = null, BrowserSessionKind sessionKind = BrowserSessionKind.Normal)
     {
         string id;
         do
@@ -39,7 +38,8 @@ public sealed class TabRegistry
         }
 
         var normalizedTitle = title?.Trim() ?? string.Empty;
-        var tab = new BrowserTab(id, string.IsNullOrWhiteSpace(url) ? NavigationInputParser.NewTabUrl : url)
+        var normalizedUrl = string.Equals(url, "brezza://newtab", StringComparison.OrdinalIgnoreCase) ? string.Empty : url;
+        var tab = new BrowserTab(id, normalizedUrl)
         {
             Title = normalizedTitle.Length == 0 ? "New Tab" : normalizedTitle,
         };

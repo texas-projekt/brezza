@@ -32,6 +32,22 @@ public sealed class HistoryStoreTests
         Assert.Empty(new HistoryStore(path).GetAll());
     }
 
+    [Fact]
+    public void Can_remove_one_entry_or_clear_all_entries()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "history.xml");
+        var store = new HistoryStore(path);
+        store.Record("https://one.example/", "One");
+        store.Record("https://two.example/", "Two");
+
+        Assert.True(store.Remove("https://one.example/"));
+        Assert.False(store.Remove("https://missing.example/"));
+        Assert.Single(store.GetAll());
+        store.Clear();
+        Assert.Empty(store.GetAll());
+    }
+
     private sealed class TestDirectory : IDisposable
     {
         public TestDirectory()

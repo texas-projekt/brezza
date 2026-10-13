@@ -5,7 +5,7 @@
 
 ## Context
 
-Brezza's browser chrome must be rendered by WebView2, following the useful multi-WebView pattern in the existing WebView2Browser project. The first `Brezza.Next` shell used native WPF controls, which did not match this product direction.
+Brezza's browser chrome must be rendered by WebView2, following the useful multi-WebView pattern in the existing WebView2Browser project. The initial shell used native WPF controls, which did not match this product direction.
 
 ## Decision
 

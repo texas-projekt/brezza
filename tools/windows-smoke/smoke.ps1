@@ -8,6 +8,43 @@ if (-not (Test-Path $exePath)) { throw 'Build Brezza.slnx in Debug before runnin
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 $pagePath = Join-Path $runRoot 'smoke.html'
 [System.IO.File]::WriteAllText($pagePath, '<!doctype html><html><head><title>Brezza Smoke Page</title></head><body><h1>Smoke Pass</h1></body></html>')
+# Trust probe: a remote document must not reach the host bridge, read browser UI assets, frame a
+# browser-owned page, or navigate into the trusted origin on its own.
+[System.IO.File]::WriteAllText(
+    (Join-Path $runRoot 'trust-probe.html'),
+    @'
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Brezza Trust Probe</title></head>
+<body>
+<h1>Trust probe</h1>
+<iframe id="frame" src="https://brezza.local/settings.html"></iframe>
+<script>
+    // A remote document must not reach a browser command bridge, read browser UI assets, frame a
+    // browser-owned page, or navigate into a browser-owned origin on its own.
+    const report = { bridge: 'pending', asset: 'pending', frame: 'pending', navigation: 'pending' };
+    window.trustProbe = report;
+    try {
+        if (typeof window.chrome === 'undefined' || !window.chrome.webview) {
+            report.bridge = 'absent';
+        } else {
+            window.chrome.webview.postMessage(JSON.stringify({ version: 1, type: 'newTab', args: {} }));
+            report.bridge = 'posted';
+        }
+    } catch (error) {
+        report.bridge = 'blocked';
+    }
+    fetch('https://brezza.local/locales/en.json')
+        .then(response => { report.asset = 'status:' + response.status; })
+        .catch(() => { report.asset = 'rejected'; })
+        .finally(() => {
+            // The navigation attempt waits for the asset result, so the report is complete first.
+            setTimeout(() => { report.navigation = 'attempted'; location.href = 'https://brezza.local/settings.html'; }, 500);
+        });
+</script>
+</body>
+</html>
+'@)
 [System.IO.File]::WriteAllText(
     (Join-Path $runRoot 'history.xml'),
     '<history schemaVersion="1"><entry><url>https://example.test/</url><title>Example Seeded</title><lastVisitedUtc>2025-01-01T00:00:00</lastVisitedUtc><visitCount>1</visitCount></entry></history>')
@@ -36,10 +73,16 @@ function Invoke-SmokeProcess([string]$mode, [string]$resultPath) {
         throw "Brezza smoke process timed out in mode '$mode'."
     }
 
-    if (-not (Test-Path $resultPath)) { throw "Brezza smoke process exited without a result in mode '$mode' ($($process.ExitCode))." }
-    $result = Get-Content -LiteralPath $resultPath -Raw
-    if (-not $result.StartsWith('PASS:', [StringComparison]::Ordinal)) { throw $result }
-    return $result.Trim()
+    if (Test-Path $resultPath) {
+        $result = Get-Content -LiteralPath $resultPath -Raw
+        if (-not $result.StartsWith('PASS:', [StringComparison]::Ordinal)) {
+            # Keep the run root so the failure detail and isolated data can be inspected.
+            Write-Warning "Brezza smoke failed in mode '$mode'. Data root kept for inspection: $runRoot"
+            throw $result
+        }
+    }
+
+    return (Get-Content -LiteralPath $resultPath -Raw).Trim()
 }
 
 try {
@@ -64,11 +107,16 @@ finally {
     else { $env:BREZZA_SMOKE_LANGUAGE = $previous.SmokeLanguage }
 
     if (Test-Path $runRoot) {
+        if ($env:BREZZA_SMOKE_KEEP -eq '1') {
+            Write-Warning "Smoke data root kept for inspection: $runRoot"
+        }
+        else {
         $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(15)
         while ((Test-Path $runRoot) -and [DateTime]::UtcNow -lt $cleanupDeadline) {
             try { Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction Stop }
             catch { Start-Sleep -Milliseconds 500 }
         }
         if (Test-Path $runRoot) { Write-Warning "WebView2 still holds the isolated smoke profile: $runRoot" }
+        }
     }
 }

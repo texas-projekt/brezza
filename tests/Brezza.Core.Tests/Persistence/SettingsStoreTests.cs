@@ -1,4 +1,5 @@
 using Brezza.Persistence;
+using Brezza.Core.Navigation;
 
 namespace Brezza.Core.Tests.Persistence;
 
@@ -39,6 +40,22 @@ public sealed class SettingsStoreTests
 
         Assert.Equal(BrowserSettings.CurrentSchemaVersion, settings.SchemaVersion);
         Assert.Equal("https://www.bing.com/search?q={query}", settings.SearchTemplate);
+    }
+
+    [Fact]
+    public void Persists_theme_and_upgrades_legacy_schema()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "settings.xml");
+        var store = new SettingsStore(path);
+        store.Save(new BrowserSettings { Theme = BrowserThemeMode.Dark });
+
+        var loaded = store.Load();
+        Assert.Equal(BrowserThemeMode.Dark, loaded.Theme);
+        Assert.Equal(BrowserSettings.CurrentSchemaVersion, loaded.SchemaVersion);
+
+        File.WriteAllText(path, "<settings schemaVersion=\"1\"><searchTemplate>https://www.bing.com/search?q={query}</searchTemplate></settings>");
+        Assert.Equal(BrowserThemeMode.System, store.Load().Theme);
     }
 
     private sealed class TestDirectory : IDisposable

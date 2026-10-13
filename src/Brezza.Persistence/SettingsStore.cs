@@ -22,13 +22,15 @@ public sealed class SettingsStore
         {
             using var stream = File.OpenRead(_path);
             if (new XmlSerializer(typeof(BrowserSettings)).Deserialize(stream) is not BrowserSettings settings ||
-                settings.SchemaVersion != BrowserSettings.CurrentSchemaVersion)
+                (settings.SchemaVersion != BrowserSettings.CurrentSchemaVersion && settings.SchemaVersion != 1))
             {
                 return new BrowserSettings();
             }
 
             settings.SearchTemplate = NavigationInputParser.ValidateTemplate(settings.SearchTemplate);
             settings.Language = BrowserSettings.NormalizeLanguage(settings.Language);
+            settings.Theme = BrowserSettings.NormalizeTheme(settings.Theme);
+            settings.SchemaVersion = BrowserSettings.CurrentSchemaVersion;
             return settings;
         }
         catch (Exception exception) when (exception is IOException || exception is InvalidOperationException || exception is ArgumentException)
@@ -47,6 +49,7 @@ public sealed class SettingsStore
 
         settings.SearchTemplate = NavigationInputParser.ValidateTemplate(settings.SearchTemplate);
         settings.Language = BrowserSettings.NormalizeLanguage(settings.Language);
+        settings.Theme = BrowserSettings.NormalizeTheme(settings.Theme);
         var directory = Path.GetDirectoryName(_path);
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
 
