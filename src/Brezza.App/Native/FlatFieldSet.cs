@@ -24,7 +24,6 @@ namespace Brezza.App.Native;
 internal sealed class FlatFieldSet : IDisposable
 {
     private const string GlyphChevron = "\uE70D";
-    private const int Radius = 4;
     private const int Padding = 10;
     private const int ChevronWidth = 32;
 
@@ -105,7 +104,6 @@ internal sealed class FlatFieldSet : IDisposable
     /// </summary>
     public void Refresh(int fieldHeight)
     {
-        var dark = _theme.Palette.Dark;
         foreach (var pair in _fields)
         {
             var control = pair.Key;
@@ -113,14 +111,14 @@ internal sealed class FlatFieldSet : IDisposable
             NativeMethods.SetWindowFont(control, _fonts.Body, false);
             if (field.Combo)
             {
-                if (field.Edit != IntPtr.Zero) NativeMethods.SetWindowTheme(field.Edit, dark ? "DarkMode_CFD" : null, null);
+                if (field.Edit != IntPtr.Zero) _theme.ApplyToField(field.Edit);
                 SetComboHeight(control, fieldHeight);
                 PositionInnerEdit(control, field);
                 NativeMethods.InvalidateRect(control, IntPtr.Zero, false);
             }
             else
             {
-                NativeMethods.SetWindowTheme(control, dark ? "DarkMode_CFD" : null, null);
+                _theme.ApplyToField(control);
                 RecalculateFrame(control);
             }
         }
@@ -208,6 +206,11 @@ internal sealed class FlatFieldSet : IDisposable
     {
         switch (msg)
         {
+            // Same reason as the combo box: the edit fills its own client area in WM_PAINT, so a
+            // system-colored erase step in front of it is only a flash.
+            case NativeMethods.WM_ERASEBKGND:
+                return new IntPtr(1);
+
             case NativeMethods.WM_NCCALCSIZE:
                 // Inset the client area: horizontal padding and a vertically centered text line.
                 var rect = Marshal.PtrToStructure<NativeMethods.RECT>(lParam);
@@ -435,19 +438,14 @@ internal sealed class FlatFieldSet : IDisposable
     private void PaintField(IntPtr dc, NativeMethods.RECT bounds, FlatBackdrop backdrop, bool focused, bool hot)
     {
         var palette = _theme.Palette;
-        var backdropColor = backdrop switch
-        {
-            FlatBackdrop.Frame => palette.Frame,
-            FlatBackdrop.Notice => palette.Notice,
-            _ => palette.Surface,
-        };
-        var radius = Scale(Radius);
+        var backdropColor = palette.Backdrop(backdrop);
+        var radius = Scale(NativeMetrics.RadiusControl);
         NativePaint.Fill(dc, bounds, backdropColor, _theme);
         NativePaint.FillRounded(dc, bounds, radius, palette.Field, _theme);
         NativePaint.FrameRounded(dc, bounds, radius, hot && !focused ? palette.BorderHover : palette.Border, _theme);
         if (!focused) return;
 
-        var underline = Math.Max(2, Scale(2));
+        var underline = Math.Max(2, Scale(NativeMetrics.FocusIndicatorThickness));
         NativePaint.Fill(dc, NativePaint.Rect(bounds.left + radius / 2, bounds.bottom - underline,
             bounds.Width - radius, underline), palette.Accent, _theme);
     }

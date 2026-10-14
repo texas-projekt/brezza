@@ -81,9 +81,6 @@ internal sealed class InternalPanelWindow : IDisposable
     public const int IdSubtitle = 2022;
 
     // Unscaled metrics at 96 DPI.
-    private const int Margin = 24;
-    private const int FieldHeight = 32;
-    private const int RowGap = 16;
     private const int ListRowHeight = 48;
     private const int FooterHeight = 64;
     private const int RemoveButtonSize = 28;
@@ -92,7 +89,8 @@ internal sealed class InternalPanelWindow : IDisposable
     private readonly NativeMethods.WndProc _wndProc;
     private readonly Localization _localization;
     private readonly IntPtr _owner;
-    private readonly NativeThemeResources _theme = new();
+    private readonly NativeThemeSource _themeSource;
+    private readonly NativeThemeResources _theme;
     private readonly NativeFonts _fonts = new();
     private readonly FlatButtonSet _buttons;
     private readonly FlatFieldSet _fields;
@@ -131,14 +129,18 @@ internal sealed class InternalPanelWindow : IDisposable
     private BrowserThemeMode _savedTheme = BrowserThemeMode.System;
     private string? _statusKey;
 
-    public InternalPanelWindow(Localization localization, IntPtr owner)
+    public InternalPanelWindow(Localization localization, IntPtr owner, NativeThemeSource themeSource)
     {
         _localization = localization ?? throw new ArgumentNullException(nameof(localization));
         _owner = owner;
+        _themeSource = themeSource ?? throw new ArgumentNullException(nameof(themeSource));
+        _theme = new NativeThemeResources(_themeSource);
         _wndProc = OnWindowMessage;
         _buttons = new FlatButtonSet(_theme, _fonts, () => _dpi);
         _fields = new FlatFieldSet(_theme, _fonts, () => _dpi);
         _listSubclass = OnListMessage;
+        // The panel follows the shared source, so a theme change repaints it like every other window.
+        _themeSource.Changed += OnThemeChanged;
     }
 
     public event EventHandler<SettingsSubmission>? SaveSettingsRequested;
@@ -253,9 +255,10 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
     }
 
-    public void ApplyTheme(BrowserThemeMode mode)
+    /// <summary>Repaints the panel when the shared theme source resolved a different palette.</summary>
+    private void OnThemeChanged(object? sender, EventArgs e)
     {
-        _theme.Apply(mode);
+        _theme.ReleaseBrushes();
         ApplyControlTheme();
     }
 
@@ -279,6 +282,7 @@ internal sealed class InternalPanelWindow : IDisposable
         _buttons.Dispose();
         _fields.Dispose();
         _fonts.Dispose();
+        _themeSource.Changed -= OnThemeChanged;
         _theme.Dispose();
     }
 
@@ -445,8 +449,8 @@ internal sealed class InternalPanelWindow : IDisposable
             if (!IsSettings)
             {
                 var frame = ListFrame();
-                NativePaint.FillRounded(dc, frame, Scale(4), palette.Field, _theme);
-                NativePaint.FrameRounded(dc, frame, Scale(4), palette.Border, _theme);
+                NativePaint.FillRounded(dc, frame, Scale(NativeMetrics.RadiusControl), palette.Field, _theme);
+                NativePaint.FrameRounded(dc, frame, Scale(NativeMetrics.RadiusControl), palette.Border, _theme);
             }
             else
             {
@@ -582,7 +586,7 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.SetWindowFont(_titleText, _fonts.Heading, false);
         NativeMethods.SendMessage(_listView, NativeMethods.LB_SETITEMHEIGHT, IntPtr.Zero, new IntPtr(Scale(ListRowHeight)));
         _buttons.Refresh();
-        _fields.Refresh(Scale(FieldHeight));
+        _fields.Refresh(Scale(NativeMetrics.ControlHeight));
     }
 
     private void ApplyControlTheme()
@@ -591,10 +595,11 @@ internal sealed class InternalPanelWindow : IDisposable
         _theme.ApplyToWindowFrame(_hwnd);
         _theme.ApplyToControl(_listView);
         _buttons.Refresh();
-        _fields.Refresh(Scale(FieldHeight));
+        _fields.Refresh(Scale(NativeMetrics.ControlHeight));
         NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_FRAMECHANGED);
-        NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
+        // Repaint the panel and all its controls now, in the same pass as the main window.
+        NativeMethods.RedrawWindow(_hwnd, IntPtr.Zero, IntPtr.Zero, NativeMethods.RDW_REPAINT_ALL_NOW);
     }
 
     private void ApplyDpiChange(uint dpi, IntPtr suggestedRect)
@@ -821,7 +826,7 @@ internal sealed class InternalPanelWindow : IDisposable
             selection.right -= Scale(4);
             selection.top += Scale(2);
             selection.bottom -= Scale(2);
-            NativePaint.FillRounded(item.hDC, selection, Scale(4), palette.Selection, _theme);
+            NativePaint.FillRounded(item.hDC, selection, Scale(NativeMetrics.RadiusControl), palette.Selection, _theme);
         }
 
         var entry = _visible[(int)item.itemID];
@@ -833,7 +838,7 @@ internal sealed class InternalPanelWindow : IDisposable
         if (row == _hotRow || (item.itemState & NativeMethods.ODS_SELECTED) != 0)
         {
             var button = RemoveButtonRect(rect);
-            if (row == _hotRow && _hotRemove) NativePaint.FillRounded(item.hDC, button, Scale(4), palette.Hover, _theme);
+            if (row == _hotRow && _hotRemove) NativePaint.FillRounded(item.hDC, button, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
             NativePaint.Text(item.hDC, GlyphRemove, button, _fonts.SmallIcon, palette.SecondaryText,
                 NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
         }
@@ -1019,7 +1024,7 @@ internal sealed class InternalPanelWindow : IDisposable
     {
         if (_hwnd == IntPtr.Zero) return;
         NativeMethods.GetClientRect(_hwnd, out var client);
-        var margin = Scale(Margin);
+        var margin = Scale(NativeMetrics.SpaceXLarge);
         var width = Math.Max(Scale(280), client.Width - margin * 2);
         var y = margin;
 
@@ -1028,7 +1033,7 @@ internal sealed class InternalPanelWindow : IDisposable
         y += headingHeight + Scale(4);
         var bodyHeight = NativeFonts.Measure(_hwnd, _fonts.Body, "Ag").y;
         NativeMethods.MoveWindow(_subtitleText, margin, y, width, bodyHeight, true);
-        y += bodyHeight + Scale(24);
+        y += bodyHeight + Scale(NativeMetrics.SpaceXLarge);
 
         var footerTop = client.Height - Scale(FooterHeight);
         if (IsSettings) LayoutSettings(margin, y, width, bodyHeight);
@@ -1054,7 +1059,7 @@ internal sealed class InternalPanelWindow : IDisposable
         {
             var fieldHeight = PlaceField(field, fieldLeft, y, fieldWidth);
             NativeMethods.MoveWindow(label, left, y + (fieldHeight - bodyHeight) / 2, labelWidth, bodyHeight, true);
-            y += fieldHeight + Scale(RowGap);
+            y += fieldHeight + Scale(NativeMetrics.SpaceLarge);
         }
 
         NativeMethods.MoveWindow(_statusText, fieldLeft, y, fieldWidth, bodyHeight, true);
@@ -1068,8 +1073,8 @@ internal sealed class InternalPanelWindow : IDisposable
         if (_mode == InternalPanelMode.History)
         {
             var clearWidth = TextButtonWidth(_clearButton);
-            searchWidth = width - clearWidth - Scale(8);
-            NativeMethods.MoveWindow(_clearButton, left + searchWidth + Scale(8), top, clearWidth, Scale(FieldHeight), true);
+            searchWidth = width - clearWidth - Scale(NativeMetrics.SpaceSmall);
+            NativeMethods.MoveWindow(_clearButton, left + searchWidth + Scale(NativeMetrics.SpaceSmall), top, clearWidth, Scale(NativeMetrics.ControlHeight), true);
         }
 
         var fieldHeight = PlaceField(_filterEdit, left, top, searchWidth);
@@ -1085,7 +1090,7 @@ internal sealed class InternalPanelWindow : IDisposable
     /// <summary>Positions a field control and returns the height of its row.</summary>
     private int PlaceField(IntPtr field, int left, int top, int width)
     {
-        var height = Scale(FieldHeight);
+        var height = Scale(NativeMetrics.ControlHeight);
         // An edit takes the row height directly; a drop-down list's window height is its open list,
         // and the field renderer sizes the closed field to the row.
         var isEdit = field == _templateEdit || field == _filterEdit;
@@ -1095,9 +1100,9 @@ internal sealed class InternalPanelWindow : IDisposable
 
     private void LayoutFooter(int clientWidth, int footerTop)
     {
-        var margin = Scale(Margin);
-        var buttonHeight = Scale(32);
-        var gap = Scale(8);
+        var margin = Scale(NativeMetrics.SpaceXLarge);
+        var buttonHeight = Scale(NativeMetrics.ControlHeight);
+        var gap = Scale(NativeMetrics.SpaceSmall);
         var buttonTop = footerTop + (Scale(FooterHeight) - buttonHeight) / 2;
 
         // Windows dialog order, right-aligned: the primary action, then Cancel at the far right.

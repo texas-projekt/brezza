@@ -41,10 +41,9 @@ internal sealed class FlatPopup : IDisposable
 {
     public const string WindowClassName = "BrezzaFlatPopup";
 
-    private const int RowHeight = 32;
+    // A pop-up row is as tall as the control that opens it.
+    private const int RowHeight = NativeMetrics.ControlHeight;
     private const int SeparatorHeight = 9;
-    private const int Inset = 4;
-    private const int TextPadding = 12;
     private const int MaximumVisibleRows = 10;
 
     private readonly NativeThemeResources _theme;
@@ -96,11 +95,11 @@ internal sealed class FlatPopup : IDisposable
         EnsureWindow(owner);
 
         var width = Math.Max(Math.Max(minimumWidth, anchorRect.Width), MeasureWidth());
-        var height = ContentHeight(VisibleCount()) + Scale(Inset) * 2;
+        var height = ContentHeight(VisibleCount()) + Scale(NativeMetrics.SpaceXSmall) * 2;
         var work = WorkArea(anchorRect);
         var x = alignRight ? anchorRect.right - width : anchorRect.left;
         x = Math.Max(work.left, Math.Min(x, work.right - width));
-        var gap = Scale(4);
+        var gap = Scale(NativeMetrics.SpaceXSmall);
         var y = anchorRect.bottom + gap;
         if (y + height > work.bottom && anchorRect.top - gap - height >= work.top) y = anchorRect.top - gap - height;
         EnsureVisible(_hot);
@@ -331,7 +330,7 @@ internal sealed class FlatPopup : IDisposable
             var palette = _theme.Palette;
             NativePaint.Fill(dc, client, palette.Surface, _theme);
 
-            var inset = Scale(Inset);
+            var inset = Scale(NativeMetrics.SpaceXSmall);
             var y = inset;
             var last = Math.Min(_items.Count, _scroll + VisibleCount());
             for (var index = _scroll; index < last; index++)
@@ -345,7 +344,7 @@ internal sealed class FlatPopup : IDisposable
                 }
 
                 var row = NativePaint.Rect(inset, y, client.Width - inset * 2, Scale(RowHeight));
-                if (index == _hot) NativePaint.FillRounded(dc, row, Scale(4), palette.Hover, _theme);
+                if (index == _hot) NativePaint.FillRounded(dc, row, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
                 if (item.Selected)
                 {
                     // The same short accent bar Windows 11 uses to mark the current value of a list.
@@ -356,8 +355,8 @@ internal sealed class FlatPopup : IDisposable
                 }
 
                 var text = row;
-                text.left += Scale(TextPadding);
-                text.right -= Scale(TextPadding);
+                text.left += Scale(NativeMetrics.SpaceMedium);
+                text.right -= Scale(NativeMetrics.SpaceMedium);
                 const uint line = NativeMethods.DT_SINGLELINE | NativeMethods.DT_VCENTER | NativeMethods.DT_END_ELLIPSIS;
                 if (!string.IsNullOrEmpty(item.Shortcut))
                 {
@@ -421,7 +420,7 @@ internal sealed class FlatPopup : IDisposable
         var x = unchecked((short)NativeMethods.GetLoWord(lParam));
         NativeMethods.GetClientRect(_hwnd, out var client);
         if (x < 0 || x >= client.Width) return -1;
-        var top = Scale(Inset);
+        var top = Scale(NativeMetrics.SpaceXSmall);
         var last = Math.Min(_items.Count, _scroll + VisibleCount());
         for (var index = _scroll; index < last; index++)
         {
@@ -466,7 +465,7 @@ internal sealed class FlatPopup : IDisposable
             widest = Math.Max(widest, width);
         }
 
-        return widest + Scale(TextPadding + Inset) * 2;
+        return widest + Scale(NativeMetrics.SpaceMedium + NativeMetrics.SpaceXSmall) * 2;
     }
 
     private static NativeMethods.RECT WorkArea(NativeMethods.RECT anchor)

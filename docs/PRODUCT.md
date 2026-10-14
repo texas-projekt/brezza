@@ -22,7 +22,7 @@ Brezza is a lightweight Windows browser that makes search the fastest path into 
 - Private cleanup reports pending or failed removal and retries after private tabs close.
 - Website permission requests are denied with a notice until a browser-owned permission prompt is implemented.
 - Browser chrome follows the Windows UI language by default and supports English and Simplified Chinese.
-- Browser chrome follows the Windows app theme by default and lets the user override it with Light or Dark; the choice is stored in `%LOCALAPPDATA%\\Brezza`.
+- Browser chrome follows the Windows app theme by default and lets the user override it with Light or Dark; the choice is stored in `%LOCALAPPDATA%\Brezza`.
 - Features earn their place through a user workflow and measurable value.
 
 ## Initial Scope

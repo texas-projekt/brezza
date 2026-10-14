@@ -395,6 +395,16 @@ public sealed class TabRuntimeManager
     private bool IsCurrentGeneration(string tabId, int generation) =>
         _navigationGeneration.TryGetValue(tabId, out var current) && current == generation;
 
+    /// <summary>
+    /// Whether an unsuccessful navigation ended without the page failing: a newer navigation
+    /// replaced it (a reload, a new address, back/forward, or the page navigating itself while it
+    /// was loading), or it was cancelled. The newer navigation reports its own result, so neither is
+    /// shown as a failure.
+    /// </summary>
+    private static bool IsNotAFailure(TabNavigationResultEventArgs result) =>
+        result.IsSuperseded ||
+        string.Equals(result.WebErrorStatus, "OperationCanceled", StringComparison.Ordinal);
+
     private static bool SourcesMatch(string source, Uri uri)
     {
         var expected = NavigationInputParser.IsInternalPage(uri)
@@ -418,7 +428,13 @@ public sealed class TabRuntimeManager
             _hosts.Add(tab.Id, host);
             host.SourceChanged += (_, _) => _registry.Update(tab.Id, url: host.Source);
             host.TitleChanged += (_, _) => _registry.Update(tab.Id, title: host.Title);
-            host.NavigationFailed += (_, _) => _registry.Update(tab.Id, state: TabRuntimeState.Failed);
+            // A load that was replaced or cancelled also ends unsuccessfully. Remember whether the
+            // last completion was one, so it does not mark the tab as failed.
+            var lastCompletionNotAFailure = false;
+            host.NavigationFailed += (_, _) =>
+            {
+                if (!lastCompletionNotAFailure) _registry.Update(tab.Id, state: TabRuntimeState.Failed);
+            };
             host.PopupRequested += (_, args) =>
             {
                 if (!_disposed && _registry.Contains(tab.Id))
@@ -431,9 +447,16 @@ public sealed class TabRuntimeManager
             host.PermissionRequested += (_, args) => PermissionRequested?.Invoke(this, args);
             host.NavigationCompleted += (_, result) =>
             {
+                lastCompletionNotAFailure = !result.IsSuccess && IsNotAFailure(result);
+                if (lastCompletionNotAFailure) return;
+
                 if (result.IsSuccess)
                 {
-                    _registry.Update(tab.Id, url: host.Source, title: host.Title);
+                    // A page that loads after a failure (a reload, or any later navigation) ends the
+                    // failure; the tab is live again.
+                    var recovered = _registry.Contains(tab.Id) && _registry.Find(tab.Id).State == TabRuntimeState.Failed;
+                    _registry.Update(tab.Id, url: host.Source, title: host.Title,
+                        state: recovered ? TabRuntimeState.Active : null);
                 }
 
                 NavigationCompleted?.Invoke(

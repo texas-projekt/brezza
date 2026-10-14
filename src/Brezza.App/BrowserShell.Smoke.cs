@@ -134,10 +134,39 @@ internal sealed partial class BrowserShell
             string.Equals(host.Source, pageUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(host.Title, "Brezza Smoke Page", StringComparison.Ordinal), TimeSpan.FromSeconds(20));
         AssertActiveTabFinishedLoading();
+
+        // The content surface follows the chrome palette: an unpainted page must not show the
+        // WebView2 default white against the themed chrome.
+        var contentHost = _runtime?.ActiveHost as Brezza.WebView2.WebView2TabHost
+            ?? throw new InvalidOperationException("The active tab is not a WebView2 content page.");
+        var expectedBackground = _window.ContentBackgroundColor;
+        if (contentHost.BackgroundColor != expectedBackground)
+        {
+            throw new InvalidOperationException(
+                "The content surface background does not follow the chrome palette: 0x" +
+                contentHost.BackgroundColor.ToString("X6") + " != 0x" + expectedBackground.ToString("X6"));
+        }
+
+        // Pages read the chrome's light/dark scheme through prefers-color-scheme.
+        if (contentHost.PrefersDarkColorScheme != _theme.Palette.IsDark)
+        {
+            throw new InvalidOperationException(
+                "The content color scheme does not follow the chrome: prefers dark = " +
+                (contentHost.PrefersDarkColorScheme?.ToString() ?? "auto") + ", chrome dark = " + _theme.Palette.IsDark);
+        }
+
+        var pageScheme = await ExecuteActivePageScriptAsync("matchMedia('(prefers-color-scheme: dark)').matches");
+        if (!string.Equals(pageScheme, _theme.Palette.IsDark ? "true" : "false", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The page does not see the chrome color scheme: prefers-color-scheme dark = " + pageScheme);
+        }
+
         if (!string.Equals(_window.AddressText, pageUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException("The native address field does not show the current page: " + _window.AddressText);
         }
+
+        await AssertRapidReloadIsStableAsync();
 
         // Escape must restore the committed address through the inner EDIT control.
         _window.FocusAddress();
@@ -246,9 +275,10 @@ internal sealed partial class BrowserShell
         }
         if (string.Equals(Environment.GetEnvironmentVariable("BREZZA_SMOKE_LONG_NOTICE"), "1", StringComparison.Ordinal))
         {
-            _window.SetNotice("notice.navigationFailed", new string('x', 320));
+            SendNotice(PageFailedNotice, new string('x', 320));
         }
         await PauseForVisualInspectionAsync();
+        await AssertNoticeReloadRecoversAsync(missingUri);
 
         // 9. Close a tab by middle-clicking its native strip item.
         await NavigateThroughAddressBarAsync(pageUri.AbsoluteUri);
@@ -295,6 +325,61 @@ internal sealed partial class BrowserShell
         await WaitForAsync(() =>
             _runtime?.ActiveHost is { } host &&
             string.Equals(host.Source, pageUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(20));
+    }
+
+    /// <summary>
+    /// The failure notice offers Reload. Reload must retry the address that failed, not the page
+    /// before it, and once that address loads, the notice goes away and the tab is no longer failed.
+    /// </summary>
+    private async Task AssertNoticeReloadRecoversAsync(Uri missingUri)
+    {
+        if (!_window.IsControlVisible(MainWindow.IdNoticeAction))
+            throw new InvalidOperationException("The failure notice offers no Reload action.");
+
+        // While the notice is shown, the page appears; Reload through the notice button must load it.
+        File.WriteAllText(missingUri.LocalPath, "<!doctype html><title>Recovered Page</title><h1>Recovered</h1>");
+        try
+        {
+            ClickButton(MainWindow.IdNoticeAction);
+            await WaitForAsync(() =>
+                _runtime?.ActiveHost is { IsLoading: false } host &&
+                string.Equals(host.Title, "Recovered Page", StringComparison.Ordinal), TimeSpan.FromSeconds(20));
+            if (!string.Equals(_runtime!.ActiveHost!.Source, missingUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Reload did not retry the failed address: " + _runtime.ActiveHost.Source);
+            await WaitForAsync(() => !_window.IsNoticeVisible, TimeSpan.FromSeconds(5));
+            if (_tabs?.ActiveTab?.State == TabRuntimeState.Failed)
+                throw new InvalidOperationException("The tab stayed failed after its page loaded.");
+            if (_window.WindowTitle.IndexOf(_localization.Get("notice.navigationFailed"), StringComparison.Ordinal) >= 0)
+                throw new InvalidOperationException("The window title still reports the failure: " + _window.WindowTitle);
+        }
+        finally
+        {
+            File.Delete(missingUri.LocalPath);
+        }
+    }
+
+    /// <summary>
+    /// Reloads rapidly through the F5 shortcut path. A reload that cancels the previous one must not
+    /// raise a failure notice, and an unchanged page must not re-lay out and erase the whole window:
+    /// either one shows as a flashing band below the toolbar.
+    /// </summary>
+    private async Task AssertRapidReloadIsStableAsync()
+    {
+        var rendersBefore = _window.StartPageRenders;
+        for (var round = 0; round < 5; round++)
+        {
+            OnShortcutPressed(this, new Brezza.Core.Abstractions.BrowserShortcutEventArgs(0x74, false, false, false));
+            await Task.Delay(60);
+            if (_window.IsNoticeVisible)
+                throw new InvalidOperationException("A rapid reload raised a notice: " + _window.NoticeText);
+        }
+
+        await WaitForAsync(() => _runtime?.ActiveHost is { IsLoading: false }, TimeSpan.FromSeconds(20));
+        if (_window.IsNoticeVisible)
+            throw new InvalidOperationException("A rapid reload left a notice: " + _window.NoticeText);
+        var renders = _window.StartPageRenders - rendersBefore;
+        if (renders != 0)
+            throw new InvalidOperationException("Reloading an unchanged page re-laid out the whole window " + renders + " time(s).");
     }
 
     // ---------- Native input helpers ----------

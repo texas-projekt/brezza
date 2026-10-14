@@ -110,6 +110,10 @@ public sealed class TabSleepPolicyTests
 
         public void SetRasterizationScale(double scale) { }
 
+        public void SetBackgroundColor(uint color) { }
+
+        public void SetPrefersDarkColorScheme(bool dark) { }
+
         public void Focus() { }
 
         public void Dispose() { }

@@ -105,7 +105,16 @@ internal static class NativeMethods
     internal const uint TTS_NOFADE = 0x20;
     internal const uint WM_NCPAINT = 0x0085;
     internal const uint RDW_INVALIDATE = 0x0001;
+    internal const uint RDW_ERASE = 0x0004;
+    internal const uint RDW_ALLCHILDREN = 0x0080;
+    internal const uint RDW_UPDATENOW = 0x0100;
     internal const uint RDW_FRAME = 0x0400;
+
+    /// <summary>
+    /// Repaints a window, its frame, and every child before returning, so a palette change reaches
+    /// the screen in one pass instead of one control per message-loop turn.
+    /// </summary>
+    internal const uint RDW_REPAINT_ALL_NOW = RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW;
     internal const uint WM_MEASUREITEM = 0x002C;
     internal const uint WM_MOUSEMOVE = 0x0200;
     internal const uint WM_MOUSELEAVE = 0x02A3;

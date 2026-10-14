@@ -1,6 +1,6 @@
 # ADR 0005: Browser host boundaries and lifecycle outcomes
 
-- Status: accepted
+- Status: Accepted
 - Date: 2026-10-12
 
 ## Context

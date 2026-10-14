@@ -39,6 +39,15 @@ public interface ITabHost : IDisposable
     /// <summary>Gives keyboard focus to the rendered page.</summary>
     void Focus();
 
+    /// <summary>
+    /// Sets the background the surface shows before its page paints, as a Win32 COLORREF. Rendered
+    /// pages keep controlling their own pixels; this only covers the unpainted surface.
+    /// </summary>
+    void SetBackgroundColor(uint color);
+
+    /// <summary>Tells pages whether the browser chrome is dark, through the CSS prefers-color-scheme media feature. Pages that define their own colors keep them.</summary>
+    void SetPrefersDarkColorScheme(bool dark);
+
     Task NavigateAsync(Uri uri);
 
     void GoBack();

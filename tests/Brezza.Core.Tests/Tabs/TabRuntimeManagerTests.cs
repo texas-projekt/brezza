@@ -146,6 +146,90 @@ public sealed class TabRuntimeManagerTests
     }
 
     [Fact]
+    public async Task A_navigation_replaced_by_a_newer_one_is_not_reported_as_a_failure()
+    {
+        // A reload or a new address that arrives while a page is loading cancels that load; WebView2
+        // reports it as unsuccessful with OperationCanceled. That is the user's own action, not a
+        // failure, so no failure is reported and the tab does not enter the failed state.
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var reported = new List<TabNavigationCompletedEventArgs>();
+        manager.NavigationCompleted += (_, args) => reported.Add(args);
+        var activating = manager.ActivateAsync(tab.Id);
+        var host = factory.Complete();
+        await activating;
+
+        host.RaiseNavigationCompleted(false, "OperationCanceled");
+        host.RaiseNavigationFailure();
+
+        Assert.Empty(reported);
+        Assert.NotEqual(TabRuntimeState.Failed, registry.Find(tab.Id).State);
+    }
+
+    [Fact]
+    public async Task A_superseded_load_is_not_a_failure_whatever_its_status()
+    {
+        // A page that is replaced after it started streaming reports ConnectionAborted, which on its
+        // own is also a real network error. The host marks it as superseded by a newer navigation.
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var reported = new List<TabNavigationCompletedEventArgs>();
+        manager.NavigationCompleted += (_, args) => reported.Add(args);
+        var activating = manager.ActivateAsync(tab.Id);
+        var host = factory.Complete();
+        await activating;
+
+        host.RaiseNavigationCompleted(false, "ConnectionAborted", superseded: true);
+
+        Assert.Empty(reported);
+        Assert.NotEqual(TabRuntimeState.Failed, registry.Find(tab.Id).State);
+    }
+
+    [Fact]
+    public async Task A_real_navigation_failure_is_still_reported()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        TabNavigationCompletedEventArgs? reported = null;
+        manager.NavigationCompleted += (_, args) => reported = args;
+        var activating = manager.ActivateAsync(tab.Id);
+        var host = factory.Complete();
+        await activating;
+
+        host.RaiseNavigationCompleted(false, "HostNameNotResolved");
+        host.RaiseNavigationFailure();
+
+        Assert.NotNull(reported);
+        Assert.False(reported!.IsSuccess);
+        Assert.Equal("HostNameNotResolved", reported.Error);
+        Assert.Equal(TabRuntimeState.Failed, registry.Find(tab.Id).State);
+    }
+
+    [Fact]
+    public async Task A_page_that_loads_after_a_failure_clears_the_failed_state()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var activating = manager.ActivateAsync(tab.Id);
+        var host = factory.Complete();
+        await activating;
+        host.RaiseNavigationCompleted(false, "HostNameNotResolved");
+        host.RaiseNavigationFailure();
+
+        host.RaiseNavigationCompleted(true, "Unknown");
+
+        Assert.Equal(TabRuntimeState.Active, registry.Find(tab.Id).State);
+    }
+
+    [Fact]
     public async Task Closing_last_private_tab_cleans_its_profile()
     {
         var registry = new TabRegistry();
@@ -536,6 +620,10 @@ public sealed class TabRuntimeManagerTests
 
         public (int X, int Y, int Width, int Height) Bounds { get; private set; }
 
+        public uint BackgroundColor { get; private set; }
+
+        public bool? PrefersDark { get; private set; }
+
         public event EventHandler? SourceChanged;
 
         public event EventHandler? TitleChanged;
@@ -577,8 +665,8 @@ public sealed class TabRuntimeManagerTests
 
         public void RaiseNavigationFailure() => NavigationFailed?.Invoke(this, EventArgs.Empty);
 
-        public void RaiseNavigationCompleted(bool success, string status) =>
-            NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(success, status));
+        public void RaiseNavigationCompleted(bool success, string status, bool superseded = false) =>
+            NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(success, status, superseded));
 
         public void RaisePopup(string? targetUrl) => PopupRequested?.Invoke(this, new PopupRequestedEventArgs(targetUrl));
 
@@ -598,6 +686,10 @@ public sealed class TabRuntimeManagerTests
         public void SetBounds(int x, int y, int width, int height) => Bounds = (x, y, width, height);
 
         public void SetRasterizationScale(double scale) => RasterizationScale = scale;
+
+        public void SetBackgroundColor(uint color) => BackgroundColor = color;
+
+        public void SetPrefersDarkColorScheme(bool dark) => PrefersDark = dark;
 
         public void Focus() { }
     }

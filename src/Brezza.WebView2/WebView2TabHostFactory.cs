@@ -10,6 +10,17 @@ using Microsoft.Web.WebView2.Core;
 
 namespace Brezza.WebView2;
 
+/// <summary>Converts between Win32 COLORREF values and the colors WebView2 takes.</summary>
+public static class WebView2Color
+{
+    /// <summary>Converts a Win32 COLORREF to the color a WebView2 surface is created with.</summary>
+    public static System.Drawing.Color FromColorref(uint colorref) =>
+        System.Drawing.Color.FromArgb(
+            unchecked((byte)(colorref & 0xFF)),
+            unchecked((byte)((colorref >> 8) & 0xFF)),
+            unchecked((byte)((colorref >> 16) & 0xFF)));
+}
+
 public sealed class WebView2TabHostFactory : ITabHostFactory
 {
     private static readonly TimeSpan CleanupBudget = TimeSpan.FromSeconds(6);
@@ -18,6 +29,7 @@ public sealed class WebView2TabHostFactory : ITabHostFactory
     private readonly string _userDataRoot;
     private readonly IntPtr _parentWindow;
     private readonly string? _downloadsFolder;
+    private readonly Color _defaultBackgroundColor;
     private Task<CoreWebView2Environment>? _normalEnvironmentTask;
     private Task<CoreWebView2Environment>? _privateEnvironmentTask;
     private string? _privateUserDataFolder;
@@ -26,11 +38,18 @@ public sealed class WebView2TabHostFactory : ITabHostFactory
     private readonly List<string> _pendingPrivateFolders = new();
 
     /// <param name="parentWindow">Native window the WebView2 controllers are parented to.</param>
-    public WebView2TabHostFactory(string userDataRoot, IntPtr parentWindow, string? downloadsFolder = null)
+    /// <param name="defaultBackgroundColor">
+    /// Surface color a controller is created with. The color a controller shows before a page
+    /// paints is fixed at creation time; creating one with white and correcting it afterwards is
+    /// what flashes a white block while a page is loading.
+    /// </param>
+    public WebView2TabHostFactory(string userDataRoot, IntPtr parentWindow, string? downloadsFolder = null,
+        Color? defaultBackgroundColor = null)
     {
         _userDataRoot = userDataRoot;
         _parentWindow = parentWindow;
         _downloadsFolder = downloadsFolder;
+        _defaultBackgroundColor = defaultBackgroundColor ?? Color.White;
     }
 
     public string? PrivateUserDataFolder => _privateUserDataFolder;
@@ -115,7 +134,7 @@ public sealed class WebView2TabHostFactory : ITabHostFactory
     private static SessionCleanupResult NothingToRemove(BrowserSessionKind sessionKind) =>
         new(sessionKind, SessionCleanupState.Completed, string.Empty, 0, null);
 
-    private static CoreWebView2ControllerOptions CreateControllerOptions(CoreWebView2Environment environment, BrowserSessionKind sessionKind)
+    private CoreWebView2ControllerOptions CreateControllerOptions(CoreWebView2Environment environment, BrowserSessionKind sessionKind)
     {
         // The wrapper requires options for every controller; private mode is the only difference.
         var options = environment.CreateCoreWebView2ControllerOptions();
@@ -124,7 +143,7 @@ public sealed class WebView2TabHostFactory : ITabHostFactory
             options.IsInPrivateModeEnabled = true;
         }
 
-        options.DefaultBackgroundColor = Color.White;
+        options.DefaultBackgroundColor = _defaultBackgroundColor;
         return options;
     }
 

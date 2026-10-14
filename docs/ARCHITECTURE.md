@@ -39,18 +39,32 @@ Allowed project references are `App → Core`, `App → WebView2`, `App → Pers
 
 ## Native Shell
 
-`Program` starts a single `[STAThread]` message loop. `MessageLoopSynchronizationContext` owns a message-only window and marshals `SynchronizationContext` work onto the UI thread, so every `await` continuation in the shell runs where HWNDs and WebView2 controllers were created. The loop also inspects `WM_KEYDOWN`/`WM_SYSKEYDOWN` before dispatch, which is how browser shortcuts work while the WebView2 surface has focus.
+`Program` starts a single `[STAThread]` message loop. Local stores load and the saved theme and language are applied before the first frame is shown, so the window never appears in the system palette and is re-themed afterwards. `MessageLoopSynchronizationContext` owns a message-only window and marshals `SynchronizationContext` work onto the UI thread, so every `await` continuation in the shell runs where HWNDs and WebView2 controllers were created. The loop also inspects `WM_KEYDOWN`/`WM_SYSKEYDOWN` before dispatch, which is how browser shortcuts work while the WebView2 surface has focus.
 
 `MainWindow` registers the `BrezzaMainWindow` class and creates the chrome as child controls:
 
 | Control | Class | Purpose |
 |---|---|---|
 | Tab strip | `SysTabControl32` | Tab titles, selection, tooltips for clipped titles |
-| New tab / new private tab | `BUTTON` | Create tabs |
+| Close active tab | `BUTTON` | Closes the tab Core tracks as active |
+| New tab | `BUTTON` | Creates a normal tab |
+| Toolbar menu | `BUTTON` | Opens a menu with new tab, new private tab, history, bookmarks, and settings (Alt+F) |
 | Back / forward / reload | `BUTTON` | History navigation |
 | Address and search | `COMBOBOX` (drop-down) | Raw input submission; drop-down lists history and open tabs |
-| Bookmark / history / bookmarks / settings | `BUTTON` | Toggle a bookmark, open a browser panel |
+| Bookmark | `BUTTON` | Toggles a bookmark for the active page |
+| Caption buttons | `BUTTON` | Minimize, maximize or restore, and close the window |
 | Notice area | `STATIC` + `BUTTON` | Failure, download, permission, and cleanup notices with optional reload and dismiss |
+| New-tab page | `STATIC` | Title and subtitle of the empty new-tab state |
+
+Owner-drawn controls suppress `WM_ERASEBKGND` and paint their whole rect, so no system-colored erase step shows on the dark palette.
+
+Theme and tokens (ADR 0008):
+
+- `NativeThemePalette` (`Native/NativeTheme.cs`) is the theme: two static instances, `Light` and `Dark`, holding only color roles (`Frame`, `Surface`, `Field`, `Text`, `Accent`, …) and a `Scheme` that selects the Windows light or dark rendering of standard controls. `Backdrop(FlatBackdrop)` and `TextOn(FlatBackdrop)` map a control's backdrop role to its colors. No other file defines a color.
+- `NativeThemeSource` is the single source of the active theme. `BrowserShell` owns it and sets the mode; `MainWindow` and `InternalPanelWindow` take it in their constructors and repaint on its `Changed` event. `WM_SETTINGCHANGE` with `ImmersiveColorSet` calls `RefreshSystem()`, which raises `Changed` only when the resolved palette changes.
+- `NativeThemeResources` is per-window: cached GDI brushes for the current palette and the dark visual classes (`DarkMode_Explorer`, `DarkMode_CFD`) for standard controls.
+- `NativeMetrics` (`Native/NativeMetrics.cs`) holds the shared size tokens (radii, spacing, control heights) in unscaled pixels. They are not part of a theme. Sizes that belong to one control's own layout stay constants in that class.
+- A content surface is not a native window, so `BrowserShell` carries the theme to it: the surface color and the `prefers-color-scheme` preference are set before the surface becomes visible and again when the theme changes.
 
 Layout is computed in physical pixels from the window DPI. `WM_SIZE` repositions the controls and updates the active controller's `Bounds`; `WM_DPICHANGED` applies the suggested rectangle, rebuilds the fonts, and updates `RasterizationScale`. The app manifest declares `PerMonitorV2` awareness and a Common-Controls 6 dependency, so the controls follow the Windows visual style.
 
@@ -63,8 +77,9 @@ The tab strip is subclassed (`SetWindowSubclass`) so middle-click closes a tab a
 - `IsWebMessageEnabled = false` and no `WebMessageReceived` handler is registered.
 - `AreBrowserAcceleratorKeysEnabled = false`, so the native window owns shortcuts.
 - Default context menus stay enabled for the page; the runtime's own download dialog is suppressed.
+- The controller is created with the shell palette color through the controller options, and the color is applied before the surface becomes visible, so a surface that has not painted yet shows the chrome background instead of the runtime's default white. Rendered pages keep controlling their own pixels.
 
-`ITabHost` exposes the view surface the shell needs without exposing COM objects: `SetVisible`, `SetBounds`, `SetRasterizationScale`, and `Focus`. Only the active tab's host is visible. Controller creation failures complete the host's creation task with the exception, so a tab that cannot render reports a failure instead of waiting forever. Closing a tab while its controller is still being created closes the controller as soon as it exists.
+`ITabHost` exposes the view surface the shell needs without exposing COM objects: `SetVisible`, `SetBounds`, `SetRasterizationScale`, `SetBackgroundColor`, `SetPrefersDarkColorScheme`, and `Focus`. Only the active tab's host is visible. Controller creation failures complete the host's creation task with the exception, so a tab that cannot render reports a failure instead of waiting forever. Closing a tab while its controller is still being created closes the controller as soon as it exists.
 
 ## Browser-Owned Views
 

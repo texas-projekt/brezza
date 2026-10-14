@@ -131,15 +131,10 @@ internal sealed class FlatButtonSet : IDisposable
         var hot = !disabled && item.hwndItem == _hot;
         var focused = (item.itemState & NativeMethods.ODS_FOCUS) != 0 &&
             (item.itemState & NativeMethods.ODS_NOFOCUSRECT) == 0;
-        var radius = NativeMethods.Scale(4, _dpi());
+        var radius = NativeMethods.Scale(NativeMetrics.RadiusControl, _dpi());
 
-        var backdrop = entry.Backdrop switch
-        {
-            FlatBackdrop.Frame => palette.Frame,
-            FlatBackdrop.Notice => palette.Notice,
-            _ => palette.Surface,
-        };
-        var foreground = entry.Backdrop == FlatBackdrop.Notice ? palette.NoticeText : palette.Text;
+        var backdrop = palette.Backdrop(entry.Backdrop);
+        var foreground = palette.TextOn(entry.Backdrop);
         using var paint = NativePaintScope.Begin(item.hDC, "button");
         NativePaint.Fill(item.hDC, rect, backdrop, _theme);
 
@@ -194,13 +189,30 @@ internal sealed class FlatButtonSet : IDisposable
     {
         if (_tooltip == IntPtr.Zero) return;
         NativeMethods.SetWindowFont(_tooltip, _fonts.Body, false);
-        NativeMethods.SetWindowTheme(_tooltip, _theme.Palette.Dark ? "DarkMode_Explorer" : null, null);
+        _theme.ApplyToControl(_tooltip);
     }
 
     private IntPtr OnButtonMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, IntPtr id, IntPtr data)
     {
         switch (msg)
         {
+            // The system erases an owner-drawn button with the parent's WM_CTLCOLORBTN brush,
+            // which is the light system color unless the window answers that message. Erasing
+            // first and painting after is what flashes a light block on dark chrome, so the
+            // erase step is suppressed and WM_DRAWITEM paints the whole button.
+            case NativeMethods.WM_ERASEBKGND:
+                return new IntPtr(1);
+
+            case NativeMethods.WM_CTLCOLORBTN:
+                if (_buttons.TryGetValue(hWnd, out var entry) && _theme is { } theme)
+                {
+                    var backdrop = theme.Palette.Backdrop(entry.Backdrop);
+                    NativeMethods.SetBkColor(wParam, backdrop);
+                    return theme.Brush(backdrop);
+                }
+
+                break;
+
             case NativeMethods.WM_MOUSEMOVE when _hot != hWnd:
                 var previous = _hot;
                 _hot = hWnd;

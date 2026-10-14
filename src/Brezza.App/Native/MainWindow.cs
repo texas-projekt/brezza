@@ -59,7 +59,6 @@ internal sealed class MainWindow : IDisposable
     private const int TabTop = 6;
     private const int ToolbarHeight = 44;
     private const int NoticeHeight = 40;
-    private const int ControlSize = 32;
     private const int CaptionButtonWidth = 46;
     private const int CaptionButtonHeight = 32;
     private const int MinimumTabWidth = 64;
@@ -85,7 +84,8 @@ internal sealed class MainWindow : IDisposable
     private readonly NativeMethods.SubClassProc _tabStripSubClass;
     private readonly NativeMethods.SubClassProc _addressEditSubClass;
     private readonly Localization _localization;
-    private readonly NativeThemeResources _theme = new();
+    private readonly NativeThemeSource _themeSource;
+    private readonly NativeThemeResources _theme;
     private readonly NativeFonts _fonts = new();
     private readonly FlatButtonSet _buttons;
     private readonly FlatFieldSet _fields;
@@ -125,9 +125,12 @@ internal sealed class MainWindow : IDisposable
     private string _startTitle = string.Empty;
     private string _startSubtitle = string.Empty;
 
-    public MainWindow(Localization localization)
+    public MainWindow(Localization localization, NativeThemeSource themeSource)
     {
         _localization = localization ?? throw new ArgumentNullException(nameof(localization));
+        _themeSource = themeSource ?? throw new ArgumentNullException(nameof(themeSource));
+        _theme = new NativeThemeResources(_themeSource);
+        _themeSource.Changed += OnThemeChanged;
         _wndProc = OnWindowMessage;
         _tabStripSubClass = OnTabStripMessage;
         _addressEditSubClass = OnAddressEditMessage;
@@ -211,7 +214,7 @@ internal sealed class MainWindow : IDisposable
         var windowDpi = NativeMethods.GetDpiForWindow(_hwnd);
         if (windowDpi > 0) _dpi = windowDpi;
         ApplyFonts();
-        ApplyTheme(_theme.Mode);
+        RepaintTheme();
 
         // WM_CREATE runs before CreateWindowEx returns the top-level HWND, so the first
         // language pass is intentionally guarded. Apply it again once all handles exist.
@@ -266,6 +269,7 @@ internal sealed class MainWindow : IDisposable
         }
 
         _fonts.Dispose();
+        _themeSource.Changed -= OnThemeChanged;
         _theme.Dispose();
     }
 
@@ -303,21 +307,37 @@ internal sealed class MainWindow : IDisposable
         NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
     }
 
-    public void ApplyTheme(BrowserThemeMode mode)
+    private void OnThemeChanged(object? sender, EventArgs e) => RepaintTheme();
+
+    /// <summary>
+    /// Repaints every native surface for the palette the shared source resolved. The window owns no
+    /// palette of its own: it renders state it is given, so a theme change is one synchronous pass.
+    /// </summary>
+    private void RepaintTheme()
     {
-        _theme.Apply(mode);
+        // Brushes of the previous palette must be gone before anything repaints: a control that
+        // erases itself with a stale brush, and paints with a fresh one, is what makes a theme
+        // switch arrive in two steps.
+        _theme.ReleaseBrushes();
         if (_hwnd == IntPtr.Zero) return;
 
         _theme.ApplyToWindowFrame(_hwnd);
         var tabTooltips = NativeMethods.SendMessage(_tabStrip, NativeMethods.TCM_GETTOOLTIPS, IntPtr.Zero, IntPtr.Zero);
         _theme.ApplyToControl(tabTooltips);
         _buttons.Refresh();
-        _fields.Refresh(Scale(ControlSize));
+        _fields.Refresh(Scale(NativeMetrics.ControlHeight));
+
+        // The frame change re-applies the window corner and non-client metrics.
         NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE |
             NativeMethods.SWP_NOZORDER | NativeMethods.SWP_FRAMECHANGED);
-        NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
         Layout();
+
+        // Dependent surfaces (content background, open panel) take the palette before anything
+        // repaints, then the whole window repaints at once. Invalidating controls one by one lets
+        // the message loop repaint them on separate turns, so a switch arrives in visible steps.
+        ThemeChanged?.Invoke(this, EventArgs.Empty);
+        NativeMethods.RedrawWindow(_hwnd, IntPtr.Zero, IntPtr.Zero, NativeMethods.RDW_REPAINT_ALL_NOW);
     }
 
     public void UpdateTabs(IReadOnlyList<BrowserTab> tabs, string? activeTabId, bool activeLoading = false)
@@ -443,9 +463,19 @@ internal sealed class MainWindow : IDisposable
     /// <summary>Shows the browser-owned new-tab page while the active tab has no content host.</summary>
     public void SetNewTabPage(bool visible, bool isPrivate)
     {
+        var title = _localization.Get(isPrivate ? "start.privateTitle" : "app.name");
+        var subtitle = _localization.Get(isPrivate ? "start.privateBody" : "start.subtitle");
+
+        // The shell renders state on every source, title, and loading change, so this is called many
+        // times per page load. Re-laying out and erasing the whole window for an unchanged page
+        // flashes the start-page text and the content edge on every reload.
+        if (visible == _startPageVisible &&
+            string.Equals(title, _startTitle, StringComparison.Ordinal) &&
+            string.Equals(subtitle, _startSubtitle, StringComparison.Ordinal)) return;
+
         _startPageVisible = visible;
-        _startTitle = _localization.Get(isPrivate ? "start.privateTitle" : "app.name");
-        _startSubtitle = _localization.Get(isPrivate ? "start.privateBody" : "start.subtitle");
+        _startTitle = title;
+        _startSubtitle = subtitle;
         RenderStartPage();
     }
 
@@ -515,6 +545,12 @@ internal sealed class MainWindow : IDisposable
     /// <summary>The window's DPI as a WebView2 rasterization scale (1.0 at 96 DPI).</summary>
     public double ContentScale => _dpi / (double)NativeMethods.USER_DEFAULT_SCREEN_DPI;
 
+    /// <summary>Raised after the palette changed, so dependent surfaces can follow it.</summary>
+    public event EventHandler? ThemeChanged;
+
+    /// <summary>The content-area background the palette paints behind the WebView2 surface.</summary>
+    public uint ContentBackgroundColor => _theme.Palette.Surface;
+
     // ---------- Window procedure ----------
 
     private IntPtr OnWindowMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -558,7 +594,10 @@ internal sealed class MainWindow : IDisposable
                     return IntPtr.Zero;
 
                 case NativeMethods.WM_SETTINGCHANGE:
-                    if (_theme.Mode == BrowserThemeMode.System) ApplyTheme(_theme.Mode);
+                    // Windows broadcasts this for unrelated settings too; only a palette change
+                    // re-resolves the system palette, which raises Changed just on a real change,
+                    // so a theme switch never repaints in steps.
+                    if (IsPaletteChange(lParam)) _themeSource.RefreshSystem();
                     return IntPtr.Zero;
 
                 case NativeMethods.WM_COMMAND:
@@ -843,7 +882,7 @@ internal sealed class MainWindow : IDisposable
         if (_startTitleText != IntPtr.Zero) NativeMethods.SetWindowFont(_startTitleText, _fonts.Display, false);
 
         _buttons.Refresh();
-        _fields.Refresh(Scale(ControlSize));
+        _fields.Refresh(Scale(NativeMetrics.ControlHeight));
     }
 
     private void Label(IntPtr button, string labelKey, string tooltipKey)
@@ -876,7 +915,11 @@ internal sealed class MainWindow : IDisposable
         NativeMethods.SetWindowText(_startSubtitleText, _startSubtitle);
         Layout();
         NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
+        StartPageRenders++;
     }
+
+    /// <summary>How often the start page re-laid out and repainted the window; for the smoke harness.</summary>
+    public int StartPageRenders { get; private set; }
 
     // ---------- Layout ----------
 
@@ -907,9 +950,9 @@ internal sealed class MainWindow : IDisposable
         var stripRight = SizeTabStrip(width, _tabMirror.Count);
         var tabTop = Scale(TabTop);
         var tabHeight = Scale(CaptionHeight - TabTop);
-        var actionSize = Scale(28);
+        var actionSize = Scale(NativeMetrics.ControlHeightCompact);
         var actionTop = tabTop + (tabHeight - actionSize) / 2;
-        NativeMethods.MoveWindow(_newTabButton, stripRight + Scale(4), actionTop, actionSize, actionSize, true);
+        NativeMethods.MoveWindow(_newTabButton, stripRight + Scale(NativeMetrics.SpaceXSmall), actionTop, actionSize, actionSize, true);
         PositionTabClose();
     }
 
@@ -924,8 +967,8 @@ internal sealed class MainWindow : IDisposable
     {
         var tabTop = Scale(TabTop);
         var tabHeight = Scale(CaptionHeight - TabTop);
-        var stripLeft = Scale(8);
-        var actionsWidth = Scale(4) + Scale(28) + Scale(4);
+        var stripLeft = Scale(NativeMetrics.SpaceSmall);
+        var actionsWidth = Scale(NativeMetrics.SpaceXSmall) + Scale(NativeMetrics.ControlHeightCompact) + Scale(NativeMetrics.SpaceXSmall);
         var available = Math.Max(Scale(MinimumTabWidth),
             width - stripLeft - actionsWidth - Scale(CaptionButtonWidth) * 3 - Scale(48));
         var count = Math.Max(1, tabCount);
@@ -943,17 +986,17 @@ internal sealed class MainWindow : IDisposable
 
     private void LayoutToolbar(int width)
     {
-        var size = Scale(ControlSize);
-        var gap = Scale(4);
+        var size = Scale(NativeMetrics.ControlHeight);
+        var gap = Scale(NativeMetrics.SpaceXSmall);
         var top = Scale(CaptionHeight) + (Scale(ToolbarHeight) - size) / 2;
-        var x = Scale(8);
+        var x = Scale(NativeMetrics.SpaceSmall);
         foreach (var button in new[] { _backButton, _forwardButton, _reloadButton })
         {
             NativeMethods.MoveWindow(button, x, top, size, size, true);
             x += size + gap;
         }
 
-        var right = width - Scale(8);
+        var right = width - Scale(NativeMetrics.SpaceSmall);
         foreach (var button in new[] { _menuButton, _bookmarkButton })
         {
             right -= size;
@@ -963,8 +1006,8 @@ internal sealed class MainWindow : IDisposable
 
         // A drop-down combo box treats its window height as the open list height; the field renderer
         // sizes the closed field to the toolbar control size.
-        var addressLeft = x + Scale(4);
-        var addressWidth = Math.Max(Scale(120), right - Scale(4) - addressLeft);
+        var addressLeft = x + Scale(NativeMetrics.SpaceXSmall);
+        var addressWidth = Math.Max(Scale(120), right - Scale(NativeMetrics.SpaceXSmall) - addressLeft);
         NativeMethods.MoveWindow(_addressCombo, addressLeft, top, addressWidth, Scale(320), true);
     }
 
@@ -973,9 +1016,9 @@ internal sealed class MainWindow : IDisposable
         if (!_noticeVisible) return;
         var top = Scale(CaptionHeight + ToolbarHeight) + 1;
         var height = Scale(NoticeHeight);
-        var buttonHeight = Scale(28);
+        var buttonHeight = Scale(NativeMetrics.ControlHeightCompact);
         var buttonTop = top + (height - buttonHeight) / 2;
-        var gap = Scale(8);
+        var gap = Scale(NativeMetrics.SpaceSmall);
         var right = width - Scale(12);
         foreach (var button in new[] { _noticeDismissButton, _noticeActionButton })
         {
@@ -987,7 +1030,7 @@ internal sealed class MainWindow : IDisposable
         }
 
         var textHeight = NativeFonts.Measure(_hwnd, _fonts.Body, "Ag").y;
-        var left = Scale(16);
+        var left = Scale(NativeMetrics.SpaceLarge);
         NativeMethods.MoveWindow(_noticeText, left, top + (height - textHeight) / 2, Math.Max(Scale(80), right - left), textHeight, true);
     }
 
@@ -1091,8 +1134,8 @@ internal sealed class MainWindow : IDisposable
             using var scope = NativePaintScope.Begin(dc, "tab strip");
             NativePaint.Fill(dc, client, palette.Frame, _theme);
             var selected = SelectedTabIndex;
-            var radius = Scale(8);
-            var padding = Scale(12);
+            var radius = Scale(NativeMetrics.RadiusTab);
+            var padding = Scale(NativeMetrics.SpaceMedium);
             for (var index = 0; index < _tabMirror.Count; index++)
             {
                 var item = TabRect(index);
@@ -1113,7 +1156,7 @@ internal sealed class MainWindow : IDisposable
                     body.right -= Scale(2);
                     body.top += Scale(3);
                     body.bottom -= Scale(4);
-                    NativePaint.FillRounded(dc, body, Scale(6), palette.Hover, _theme);
+                    NativePaint.FillRounded(dc, body, Scale(NativeMetrics.RadiusTabHover), palette.Hover, _theme);
                 }
 
                 var neighborEmphasized = index + 1 == selected || index + 1 == _hotTab;
@@ -1451,6 +1494,13 @@ internal sealed class MainWindow : IDisposable
             chosen: index => InvokeCommand(commands[index]),
             alignRight: true,
             minimumWidth: Scale(240));
+    }
+
+    /// <summary>True when a WM_SETTINGCHANGE broadcast reports a system palette change.</summary>
+    private static bool IsPaletteChange(IntPtr lParam)
+    {
+        var section = lParam == IntPtr.Zero ? null : Marshal.PtrToStringUni(lParam);
+        return string.Equals(section, "ImmersiveColorSet", StringComparison.OrdinalIgnoreCase);
     }
 
     private void PopulateAddressSuggestions()

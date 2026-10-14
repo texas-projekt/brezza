@@ -1,6 +1,6 @@
 # ADR 0003: WebView2-Rendered Browser Chrome
 
-- Status: Accepted
+- Status: Superseded by [ADR 0007](0007-native-win32-ui.md) for browser chrome rendering
 - Date: 2026-10-07
 
 ## Context

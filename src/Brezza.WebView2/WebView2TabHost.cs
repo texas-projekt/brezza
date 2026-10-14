@@ -28,6 +28,10 @@ public sealed class WebView2TabHost : ITabHost
     private Task<CoreWebView2Controller>? _creationTask;
     private bool _disposed;
     private bool _isLoading;
+
+    // The id of the navigation that started last. A navigation that completes with another id was
+    // replaced by a newer one while it was loading.
+    private ulong _latestNavigationId;
     private readonly string _hostId = "host-" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
     // The shell positions and shows a host as soon as it becomes active, which is usually before the
@@ -36,6 +40,14 @@ public sealed class WebView2TabHost : ITabHost
     private System.Drawing.Rectangle? _bounds;
     private double? _rasterizationScale;
     private bool _focusPending;
+
+    // The surface background shown before a page paints. WebView2 defaults to opaque white, which
+    // reads as a white patch against the themed chrome until the first paint lands.
+    private uint _backgroundColor = 0xFFFFFF;
+
+    // Whether the chrome theme is dark, as seen by the CSS prefers-color-scheme media feature. Null
+    // means never set: the runtime keeps its Auto default and follows the Windows system theme.
+    private bool? _prefersDark;
 
 
     internal WebView2TabHost(
@@ -152,6 +164,26 @@ public sealed class WebView2TabHost : ITabHost
         {
             Trace.TraceWarning("The tab host rasterization scale could not be applied: {0}", exception.Message);
         }
+    }
+
+    /// <summary>Sets the surface background shown before the page paints, as a Win32 COLORREF.</summary>
+    public void SetBackgroundColor(uint color)
+    {
+        _backgroundColor = color;
+        if (_disposed || _controller is not { } controller) return;
+        ApplyBackgroundColor(controller);
+    }
+
+    /// <summary>
+    /// Tells pages whether the browser chrome is dark, through the CSS prefers-color-scheme media
+    /// feature. Pages that define their own colors keep them. The preference lives on the WebView2
+    /// profile, so every tab sharing this host's profile follows the same chrome theme.
+    /// </summary>
+    public void SetPrefersDarkColorScheme(bool dark)
+    {
+        _prefersDark = dark;
+        if (_disposed || _controller is not { } controller) return;
+        ApplyColorScheme(controller);
     }
 
     public async Task NavigateAsync(Uri uri)
@@ -298,6 +330,12 @@ public sealed class WebView2TabHost : ITabHost
         }
 
         _controller = controller;
+        // The surface background is fixed before the controller becomes visible: a controller that
+        // is shown with the creation-time color and corrected afterwards is a visible white block.
+        ApplyBackgroundColor(controller);
+        // The color scheme is set before the first paint so built-in pages and form controls already
+        // answer prefers-color-scheme with the chrome theme.
+        ApplyColorScheme(controller);
         ApplyRequestedViewState(controller);
         _controllerCreation.TrySetResult(controller);
     }
@@ -326,6 +364,60 @@ public sealed class WebView2TabHost : ITabHost
             Focus();
         }
     }
+
+    /// <summary>The background the surface shows before a page paints, as a Win32 COLORREF.</summary>
+    public uint BackgroundColor => _controller is { } controller
+        ? ToColorref(controller.DefaultBackgroundColor)
+        : _backgroundColor;
+
+    /// <summary>
+    /// Whether the profile's PreferredColorScheme is Dark (true), Light (false), or Auto/never set
+    /// (null). Null means pages fall back to the Windows system theme.
+    /// </summary>
+    public bool? PrefersDarkColorScheme => _controller is { } controller
+        ? controller.CoreWebView2.Profile.PreferredColorScheme switch
+        {
+            CoreWebView2PreferredColorScheme.Dark => true,
+            CoreWebView2PreferredColorScheme.Light => false,
+            _ => null,
+        }
+        : _prefersDark;
+
+    private void ApplyBackgroundColor(CoreWebView2Controller controller)
+    {
+        try
+        {
+            controller.DefaultBackgroundColor = ToColor(_backgroundColor);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException || exception is System.Runtime.InteropServices.COMException)
+        {
+            Trace.TraceWarning("The tab host surface background could not be applied: {0}", exception.Message);
+        }
+    }
+
+    private void ApplyColorScheme(CoreWebView2Controller controller)
+    {
+        if (_prefersDark is not { } dark) return;
+        try
+        {
+            controller.CoreWebView2.Profile.PreferredColorScheme = dark
+                ? CoreWebView2PreferredColorScheme.Dark
+                : CoreWebView2PreferredColorScheme.Light;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException || exception is System.Runtime.InteropServices.COMException)
+        {
+            Trace.TraceWarning("The tab host color scheme could not be applied: {0}", exception.Message);
+        }
+    }
+
+    private static System.Drawing.Color ToColor(uint colorref) =>
+        System.Drawing.Color.FromArgb(
+            unchecked((byte)(colorref & 0xFF)),
+            unchecked((byte)((colorref >> 8) & 0xFF)),
+            unchecked((byte)((colorref >> 16) & 0xFF)));
+
+    private static uint ToColorref(System.Drawing.Color color) =>
+        (uint)(color.R | (color.G << 8) | (color.B << 16));
 
     /// <summary>Closes a controller that was created after the host was disposed.</summary>
     private void ObserveLateCreation()
@@ -394,7 +486,9 @@ public sealed class WebView2TabHost : ITabHost
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs args)
     {
         _isLoading = true;
+        _latestNavigationId = args.NavigationId;
     }
+
 
     private void OnFrameCreated(object? sender, CoreWebView2FrameCreatedEventArgs args)
     {
@@ -412,10 +506,51 @@ public sealed class WebView2TabHost : ITabHost
 
     private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs args)
     {
-        _isLoading = false;
-        NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(args.IsSuccess, args.WebErrorStatus.ToString()));
-        if (!args.IsSuccess) NavigationFailed?.Invoke(this, EventArgs.Empty);
+        // A load that a newer navigation replaced also completes unsuccessfully, with
+        // OperationCanceled or ConnectionAborted, and the runtime may report it only after the newer
+        // navigation already started. The status alone cannot tell that apart from a network
+        // failure, so an aborted result waits one message-loop turn: if a newer navigation started
+        // by then, the aborted one was replaced, not failed.
+        if (!args.IsSuccess && args.WebErrorStatus == CoreWebView2WebErrorStatus.ConnectionAborted &&
+            args.NavigationId == _latestNavigationId)
+        {
+            var navigationId = args.NavigationId;
+            var status = args.WebErrorStatus.ToString();
+            _ = ReportAbortedNavigationAsync(navigationId, status);
+            return;
+        }
+
+        CompleteNavigation(args.IsSuccess, args.WebErrorStatus.ToString(), args.NavigationId);
     }
+
+    private async Task ReportAbortedNavigationAsync(ulong navigationId, string status)
+    {
+        try
+        {
+            await Task.Delay(AbortedNavigationGrace).ConfigureAwait(true);
+            if (_disposed) return;
+            CompleteNavigation(false, status, navigationId);
+        }
+        catch (Exception exception)
+        {
+            // An event handler failed; keep it observable instead of losing the completion.
+            Trace.TraceError("Tab host {0}: an aborted navigation could not be reported: {1}", _hostId, exception);
+        }
+    }
+
+    private void CompleteNavigation(bool isSuccess, string status, ulong navigationId)
+    {
+        var superseded = !isSuccess && navigationId != _latestNavigationId;
+
+        // Only the latest navigation decides whether the page is still loading.
+        if (!superseded) _isLoading = false;
+        NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(isSuccess, status, superseded));
+        if (!isSuccess && !superseded) NavigationFailed?.Invoke(this, EventArgs.Empty);
+    }
+
+    // Long enough for a navigation the page started right after aborting the previous one to raise
+    // NavigationStarting; short enough that a real failure is still reported at once.
+    private static readonly TimeSpan AbortedNavigationGrace = TimeSpan.FromMilliseconds(150);
 
     private void OnNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs args)
     {

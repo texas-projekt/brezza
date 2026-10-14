@@ -1,6 +1,6 @@
 # ADR 0006: Unified local data directory
 
-- Status: accepted
+- Status: Accepted
 - Date: 2026-10-12
 - Supersedes: ADR 0002's separate data-directory decision
 

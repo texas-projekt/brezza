@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Brezza.App.Native;
 using Brezza.Core.Abstractions;
 using Brezza.Core.Downloads;
 using Brezza.Core.Navigation;
@@ -24,7 +25,13 @@ internal sealed partial class BrowserShell : IDisposable
     private const int PrivateCleanupTimerId = 2;
 
     private readonly Localization _localization;
+
+    // The single theme source. Every native window resolves its palette here, so the main window,
+    // panels, pop-ups, and content surfaces never disagree about the active theme.
+    private readonly NativeThemeSource _theme = new();
     private readonly MainWindow _window;
+
+    private string _dataRoot = string.Empty;
 
     private SettingsStore? _settingsStore;
     private BrowserSettings? _settings;
@@ -45,7 +52,7 @@ internal sealed partial class BrowserShell : IDisposable
     public BrowserShell()
     {
         _localization = new Localization(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BrowserUi"));
-        _window = new MainWindow(_localization);
+        _window = new MainWindow(_localization, _theme);
         WireWindow();
     }
 
@@ -53,8 +60,14 @@ internal sealed partial class BrowserShell : IDisposable
     public int Run()
     {
         _window.Create();
+
+        // The saved theme and language are applied before the first frame. Showing the window on
+        // the system palette first and re-theming it afterwards reads as white patches at startup
+        // and a theme switch that arrives in steps.
+        var preferencesLoaded = LoadPreferences();
         _window.Show();
         _window.SetTimerEnabled(SleepTimerId, true);
+        if (!preferencesLoaded) return _window.RunMessageLoop();
         InitializeAsync();
         return _window.RunMessageLoop();
     }
@@ -72,15 +85,46 @@ internal sealed partial class BrowserShell : IDisposable
         _window.ReloadRequested += (_, _) => _runtime?.Reload();
         _window.ToggleBookmarkRequested += (_, _) => ToggleBookmark();
         _window.OpenPanelRequested += (_, mode) => OpenPanel(mode);
-        _window.NoticeDismissRequested += (_, _) => _window.SetNotice(null, null);
+        _window.NoticeDismissRequested += (_, _) => SendNotice(null);
         _window.NoticeReloadRequested += (_, _) => _runtime?.Reload();
         _window.ShortcutPressed += OnShortcutPressed;
         _window.TimerTick += OnTimerTick;
         _window.ContentBoundsChanged += OnContentBoundsChanged;
+        _window.ThemeChanged += (_, _) => ApplyThemeToContent();
         _window.AddressSuggestionsProvider = GetAddressSuggestions;
     }
 
     // ---------- Startup ----------
+
+    /// <summary>
+    /// Loads the local stores and applies the saved theme and language before the first frame, so
+    /// the window never appears in the system palette and is re-themed afterwards.
+    /// </summary>
+    private bool LoadPreferences()
+    {
+        try
+        {
+            _dataRoot = ResolveDataRoot();
+            Directory.CreateDirectory(_dataRoot);
+            _settingsStore = new SettingsStore(Path.Combine(_dataRoot, "settings.xml"));
+            _settings = _settingsStore.Load();
+            _inputParser = new NavigationInputParser(_settings.SearchTemplate);
+            _historyStore = new HistoryStore(Path.Combine(_dataRoot, "history.xml"));
+            _bookmarkStore = new BookmarkStore(Path.Combine(_dataRoot, "bookmarks.xml"));
+            _sessionStore = new SessionStore(Path.Combine(_dataRoot, "session.xml"));
+
+            _localization.LoadLanguage(EffectiveLanguage);
+            _theme.SetMode(_settings.Theme);
+            _window.ApplyLanguage();
+            return true;
+        }
+        catch (Exception exception)
+        {
+            TraceError("Browser data could not be loaded", exception);
+            _window.SetStartupError(exception.Message);
+            return false;
+        }
+    }
 
     private async void InitializeAsync()
     {
@@ -102,21 +146,11 @@ internal sealed partial class BrowserShell : IDisposable
 
         try
         {
-            var dataRoot = ResolveDataRoot();
-            Directory.CreateDirectory(dataRoot);
-            _settingsStore = new SettingsStore(Path.Combine(dataRoot, "settings.xml"));
-            _settings = _settingsStore.Load();
-            _inputParser = new NavigationInputParser(_settings.SearchTemplate);
-            _historyStore = new HistoryStore(Path.Combine(dataRoot, "history.xml"));
-            _bookmarkStore = new BookmarkStore(Path.Combine(dataRoot, "bookmarks.xml"));
-            _sessionStore = new SessionStore(Path.Combine(dataRoot, "session.xml"));
-
-            _localization.LoadLanguage(EffectiveLanguage);
-            _window.ApplyTheme(_settings.Theme);
             _hostFactory = new WebView2TabHostFactory(
-                Path.Combine(dataRoot, "WebView2"),
+                Path.Combine(_dataRoot, "WebView2"),
                 _window.Handle,
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"));
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
+                PaletteSurfaceColor());
 
             _tabs = new TabRegistry();
             _tabs.Changed += (_, _) => RenderState();
@@ -129,9 +163,7 @@ internal sealed partial class BrowserShell : IDisposable
             _runtime.DownloadStatusChanged += OnDownloadStatusChanged;
             _runtime.PermissionRequested += OnPermissionRequested;
 
-            _window.ApplyLanguage();
-
-            var session = _sessionStore.Load();
+            var session = _sessionStore!.Load();
             foreach (var tab in session.Tabs!) _tabs.Restore(tab.Id, tab.Url, tab.Title);
             if (_tabs.Tabs.Count == 0) _tabs.Create();
 
@@ -301,13 +333,12 @@ internal sealed partial class BrowserShell : IDisposable
         if (mode != "settings" && mode != "history" && mode != "bookmarks") return;
         if (_panel is null)
         {
-            _panel = new InternalPanelWindow(_localization, _window.Handle);
+            _panel = new InternalPanelWindow(_localization, _window.Handle, _theme);
             _panel.SaveSettingsRequested += (_, submission) => SaveSettings(submission.SearchTemplate, submission.Language, submission.Theme);
             _panel.OpenUrlRequested += (_, url) => Observe(async () => await NavigateAsync(url));
             _panel.RemoveEntryRequested += (_, url) => RemoveEntry(url);
             _panel.ClearHistoryRequested += (_, _) => ClearHistory();
             _panel.CloseRequested += (_, _) => Observe(async () => await ClosePanelAsync());
-            _panel.ApplyTheme(_settings?.Theme ?? BrowserThemeMode.System);
         }
 
         _panelMode = mode;
@@ -364,10 +395,11 @@ internal sealed partial class BrowserShell : IDisposable
             _inputParser = new NavigationInputParser(updated.SearchTemplate);
             _localization.LoadLanguage(EffectiveLanguage);
             _window.ApplyLanguage();
-            _panel?.ApplyTheme(_settings.Theme);
-            _window.ApplyTheme(updated.Theme);
             _panel?.ApplyLanguage();
             RenderState();
+            // The theme goes last: its synchronous repaint then shows the new language and palette
+            // together. Every window follows the shared source; nothing is pushed per window.
+            _theme.SetMode(updated.Theme);
             _panel?.SetSettingsResult(true);
         }
         catch (Exception exception) when (exception is ArgumentException || exception is IOException || exception is UnauthorizedAccessException)
@@ -487,11 +519,21 @@ internal sealed partial class BrowserShell : IDisposable
                 _panel?.Close();
             }
 
-            _window.SetNewTabPage(host is null, active?.SessionKind == BrowserSessionKind.Private);
+            // A tab that holds a URL shows the palette until its content host exists. Showing the
+            // new-tab page instead flashes the new-tab text on top of a page that is loading,
+            // which is most visible when a session is restored at startup.
+            _window.SetNewTabPage(host is null && string.IsNullOrWhiteSpace(active?.Url),
+                active?.SessionKind == BrowserSessionKind.Private);
         }
 
         WriteSmokeState();
     }
+
+    /// <summary>
+    /// The chrome surface color as a Win32 COLORREF, so a controller can be created with it and a
+    /// page that has not painted yet shows the palette instead of the WebView2 default white.
+    /// </summary>
+    private System.Drawing.Color PaletteSurfaceColor() => WebView2Color.FromColorref(_window.ContentBackgroundColor);
 
     private void OnActiveHostChanged(object? sender, EventArgs e)
     {
@@ -509,6 +551,9 @@ internal sealed partial class BrowserShell : IDisposable
             _observedHost.SourceChanged += OnActiveHostStateChanged;
             _observedHost.TitleChanged += OnActiveHostStateChanged;
             _observedHost.ProcessFailed += OnActiveHostFailed;
+            // The palette reaches the surface before it becomes visible, so an unpainted page never
+            // shows the WebView2 default white.
+            ApplyThemeToHost(_observedHost);
             _observedHost.SetVisible(true);
             _observedHost.SetRasterizationScale(_window.ContentScale);
             ApplyHostBounds(_observedHost);
@@ -520,7 +565,32 @@ internal sealed partial class BrowserShell : IDisposable
 
     private void OnActiveHostStateChanged(object? sender, EventArgs e) => RenderState();
 
-    private void OnActiveHostFailed(object sender, EventArgs e) => SendNotice("notice.pageStopped");
+    private void OnActiveHostFailed(object sender, EventArgs e) => SendNotice(PageStoppedNotice);
+
+    /// <summary>Clears a notice that described a page failure; other notices stay until dismissed.</summary>
+    private void ClearPageFailureNotice()
+    {
+        if (_noticeKey is PageFailedNotice or PageStoppedNotice) SendNotice(null);
+    }
+
+    /// <summary>
+    /// Keeps the active content surface on the current theme. Native windows follow the shared
+    /// theme source themselves; a WebView2 surface is not a native window, so the shell carries it.
+    /// </summary>
+    private void ApplyThemeToContent()
+    {
+        if (_observedHost is not null) ApplyThemeToHost(_observedHost);
+    }
+
+    /// <summary>
+    /// Gives a content surface the chrome's surface color, shown before a page paints, and the
+    /// light/dark scheme pages read through prefers-color-scheme.
+    /// </summary>
+    private void ApplyThemeToHost(ITabHost host)
+    {
+        host.SetBackgroundColor(_window.ContentBackgroundColor);
+        host.SetPrefersDarkColorScheme(_theme.Palette.IsDark);
+    }
 
     private void OnContentBoundsChanged(object? sender, ContentBounds bounds) => ApplyHostBounds(_runtime?.ActiveHost);
 
@@ -591,12 +661,15 @@ internal sealed partial class BrowserShell : IDisposable
                 _historyStore?.Record(e.Url, e.Title);
             }
 
+            // The page loaded, so a failure notice about it no longer applies. RenderState also
+            // replaces the failure window title with the page title.
+            if (_tabs?.ActiveTab?.Id == e.Tab.Id) ClearPageFailureNotice();
             RenderState();
         }
         else if (_tabs?.ActiveTab?.Id == e.Tab.Id)
         {
-            _window.SetWindowTitle(_localization.Get("notice.navigationFailed") + " - " + _localization.Get("app.name"));
-            SendNotice("notice.navigationFailed", e.Error);
+            _window.SetWindowTitle(_localization.Get(PageFailedNotice) + " - " + _localization.Get("app.name"));
+            SendNotice(PageFailedNotice, e.Error);
         }
     }
 
@@ -639,7 +712,18 @@ internal sealed partial class BrowserShell : IDisposable
         }
     }
 
-    private void SendNotice(string key, string? detail = null) => _window.SetNotice(key, detail);
+    private const string PageFailedNotice = "notice.navigationFailed";
+    private const string PageStoppedNotice = "notice.pageStopped";
+
+    // The notice the window shows, so a page that recovers can clear exactly the notice its
+    // failure raised and leave unrelated notices (downloads, permissions) in place.
+    private string? _noticeKey;
+
+    private void SendNotice(string? key, string? detail = null)
+    {
+        _noticeKey = key;
+        _window.SetNotice(key, detail);
+    }
 
     // ---------- Shutdown ----------
 
