@@ -490,7 +490,10 @@ internal sealed class InternalPanelWindow : IDisposable
             0,
             WindowClassName,
             _localization.Get(TitleKey()),
-            NativeMethods.WS_OVERLAPPEDWINDOW | NativeMethods.WS_CLIPCHILDREN,
+            // No minimize or maximize box: this is a fixed-purpose panel, and an owned window that
+            // minimizes has no taskbar button to come back from.
+            NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU |
+            NativeMethods.WS_THICKFRAME | NativeMethods.WS_CLIPCHILDREN,
             x, y, width, height,
             _owner,
             IntPtr.Zero,
