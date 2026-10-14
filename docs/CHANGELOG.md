@@ -27,6 +27,8 @@
 - Stopped showing "Page could not be loaded" when a load is replaced before it finishes. WebView2 reports a replaced load as unsuccessful (`OperationCanceled`, or `ConnectionAborted` once the page started streaming, sometimes only after the newer navigation already started). The tab host now compares navigation ids and waits one short grace period on an aborted load, Core treats a superseded or cancelled load as no failure and does not mark the tab failed, and a page that aborts with nothing replacing it still reports the failure.
 - Passed the chrome's light/dark scheme to web content through `prefers-color-scheme` (WebView2 profile `PreferredColorScheme`), so built-in pages and form controls follow the chrome; pages with their own colors keep them. The Windows smoke asserts it from inside the page.
 - Made the failure notice recoverable: Reload retries the address that failed, and once it loads the notice goes away, the tab leaves the failed state, and the window title returns to the page title. The Windows smoke creates the missing page, reloads through the notice's own action, and asserts all three.
+- Merged the managed assemblies into one `Brezza.exe` when packaging (ILRepack, pinned as a local tool), so the portable build is the executable plus the native WebView2 loader and the language packs (ADR 0009). `tools/package.ps1` gained `-SkipLaunchVerification` for CI, and its launch check now proves the merged executable starts with native controls and a WebView2 surface.
+- Added GitHub Actions: `ci.yml` builds and runs the Core tests on every push and pull request; `release.yml` turns a `v*` tag into a packaged release, marking tags with a suffix such as `v0.2.0-beta.1` as pre-releases.
 
 ## Earlier
 

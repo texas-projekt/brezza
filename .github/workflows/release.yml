@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release, for example v0.1.9'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A manual run releases the tag given as input, not the branch it ran on.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - run: dotnet restore Brezza.slnx
+
+      - run: dotnet build Brezza.slnx -c Release --no-restore
+
+      # Nothing ships from a broken build.
+      - run: >-
+          dotnet test tests/Brezza.Core.Tests -c Release --no-build
+          --logger trx --results-directory artifacts/test-results
+
+      # A tag is v<semver>[-prerelease]; the leading v is dropped and any suffix marks the
+      # release as a pre-release, so v0.2.0-beta.1 and nightly tags are not shown as latest.
+      - id: version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}'
+          $version = $tag.TrimStart('v')
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "prerelease=$(if ($tag -match '-') { 'true' } else { 'false' })" >> $env:GITHUB_OUTPUT
+
+      # The merge runs here; the packaged executable is what ships (ADR 0009). The launch check is
+      # skipped because a CI runner has no interactive desktop or WebView2 runtime.
+      - run: >-
+          pwsh tools/package.ps1 -Version "${{ steps.version.outputs.version }}"
+          -SkipLaunchVerification
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brezza-${{ steps.version.outputs.version }}
+          path: dist/*.zip
+          retention-days: 30
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: ${{ steps.version.outputs.version }}
+          files: dist/*.zip
+          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
+          generate_release_notes: true

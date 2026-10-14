@@ -1,5 +1,6 @@
 **/bin/
 **/obj/
+.store/
 .vs/
 .idea/
 *.user

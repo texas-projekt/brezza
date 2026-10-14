@@ -1,4 +1,4 @@
-param([string]$Version = '0.1.8')
+param([string]$Version = '0.1.8', [switch]$SkipLaunchVerification)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -29,10 +29,32 @@ try {
     foreach ($relativePath in $required) {
         if (-not (Test-Path (Join-Path $stageRoot $relativePath))) { throw "Publish output is missing $relativePath." }
     }
-
     $loaderHash = (Get-FileHash (Join-Path $stageRoot 'WebView2Loader.dll') -Algorithm SHA256).Hash
     $x64LoaderHash = (Get-FileHash (Join-Path $stageRoot 'runtimes\win-x64\native\WebView2Loader.dll') -Algorithm SHA256).Hash
     if ($loaderHash -ne $x64LoaderHash) { throw 'Published native loader does not match the x64 target.' }
+
+    # The managed assemblies merge into one executable. The native WebView2 loader and the language
+    # packs cannot merge: Windows loads a native DLL from disk and the language packs are content
+    # files (ADR 0009). ILRepack runs from the repository's pinned local tool, without /internalize:
+    # internalizing the WebView2 interop types breaks its event registration at runtime.
+    # The merged output takes its assembly name from the file name, so it must be written as
+    # Brezza.exe: merging to any other name leaves the assembly identity wrong and the WebView2
+    # interop fails to load it at runtime.
+    $mergedDirectory = Join-Path $stageRoot 'merged'
+    New-Item -ItemType Directory -Path $mergedDirectory -Force | Out-Null
+    $merged = Join-Path $mergedDirectory 'Brezza.exe'
+    $mergeInputs = 'Brezza.exe', 'Brezza.Core.dll', 'Brezza.Persistence.dll', 'Brezza.WebView2.dll', 'Microsoft.Web.WebView2.Core.dll' |
+        ForEach-Object { Join-Path $stageRoot $_ }
+    dotnet tool restore
+    if ($LASTEXITCODE -ne 0) { throw 'dotnet tool restore failed.' }
+    dotnet ilrepack /out:$merged $mergeInputs
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $merged)) { throw 'The managed assemblies could not be merged.' }
+    Move-Item -LiteralPath $merged -Destination (Join-Path $stageRoot 'Brezza.exe') -Force
+    Remove-Item -LiteralPath $mergedDirectory -Recurse -Force
+    foreach ($merged in @('Brezza.Core.dll', 'Brezza.Persistence.dll', 'Brezza.WebView2.dll', 'Microsoft.Web.WebView2.Core.dll')) {
+        Remove-Item -LiteralPath (Join-Path $stageRoot $merged) -Force
+        if (Test-Path (Join-Path $stageRoot $merged)) { throw "$merged could not be removed from the package." }
+    }
 
     Get-ChildItem $stageRoot -Recurse -File -Filter '*.pdb' | Remove-Item -Force
     $runtimeFolder = Join-Path $stageRoot 'runtimes'
@@ -50,6 +72,8 @@ try {
     }
 
     Compress-Archive -Path (Join-Path $stageRoot '*') -DestinationPath $archivePath -CompressionLevel Optimal
+    $verification = 'launch verification skipped'
+    if (-not $SkipLaunchVerification) {
     New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null
     Expand-Archive -LiteralPath $archivePath -DestinationPath (Join-Path $smokeRoot 'app') -Force
 
@@ -131,9 +155,11 @@ public static class PackageProbe {
         if ($null -eq $previousDataRoot) { Remove-Item Env:BREZZA_DATA_DIR -ErrorAction SilentlyContinue }
         else { $env:BREZZA_DATA_DIR = $previousDataRoot }
     }
+    $verification = 'extracted app starts with native Win32 controls and a WebView2 content surface'
+    }
 
     $archiveBytes = (Get-Item $archivePath).Length
-    "PASS: $archivePath ($([math]::Round($archiveBytes / 1MB, 2)) MiB compressed); extracted x64 app starts with native Win32 controls and a WebView2 content surface."
+    "PASS: $archivePath ($([math]::Round($archiveBytes / 1MB, 2)) MiB compressed); managed assemblies merged into Brezza.exe; $verification."
 }
 finally {
     if (Test-Path $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }
