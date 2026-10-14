@@ -365,10 +365,18 @@ internal sealed partial class BrowserShell : IDisposable
 
     private async Task ClosePanelAsync()
     {
+        // The panel is an owned window that took the foreground when it opened. Windows does not
+        // always hand the foreground back when an owned window closes, and never does after a modal
+        // confirmation was shown in between, so the shell returns focus to the browser itself.
+        _window.Activate();
+
         var activeInternal = ActiveInternalRoute();
         _panelMode = null;
         _panelOwnedByTab = false;
         _panel?.Close();
+
+        // Keyboard focus returns to the page, as it was before the panel opened.
+        _observedHost?.Focus();
 
         // Leaving a browser-owned page with no history returns its tab to the new-tab page.
         if (activeInternal is not null && _tabs?.ActiveTab is { } active && _runtime is not null)

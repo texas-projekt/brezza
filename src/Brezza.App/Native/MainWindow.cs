@@ -426,6 +426,13 @@ internal sealed class MainWindow : IDisposable
         NativeMethods.SetWindowText(_hwnd, title);
     }
 
+    /// <summary>Brings the browser window to the foreground, for example when a panel closes.</summary>
+    public void Activate()
+    {
+        if (_hwnd == IntPtr.Zero) return;
+        NativeMethods.SetForegroundWindow(_hwnd);
+    }
+
     public void FocusAddress()
     {
         if (_hwnd == IntPtr.Zero || _addressCombo == IntPtr.Zero) return;

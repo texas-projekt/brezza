@@ -1,4 +1,4 @@
-﻿#if DEBUG
+#if DEBUG
 using System;
 using System.IO;
 using System.Text;
@@ -493,6 +493,40 @@ internal sealed partial class BrowserShell
         return IntPtr.Zero;
     }
 
+    /// <summary>Waits for a top-level window of a class to appear, for example a modal dialog.</summary>
+    private static async Task<IntPtr> WaitForWindowAsync(string className, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            var found = NativeMethods.FindWindowEx(IntPtr.Zero, IntPtr.Zero, className, null);
+            if (found != IntPtr.Zero) return found;
+            await Task.Delay(50);
+        }
+
+        return IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// Waits for the modal confirmation this browser process owns. Other applications can show
+    /// dialogs of the same class, so the window must belong to this process.
+    /// </summary>
+    private async Task<IntPtr> WaitForOwnedDialogAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            var found = NativeMethods.FindWindowEx(IntPtr.Zero, IntPtr.Zero, "#32770", null);
+            if (found != IntPtr.Zero && NativeMethods.IsOwnedByProcess(found, _window.Handle)) return found;
+            await Task.Delay(50);
+        }
+
+        return IntPtr.Zero;
+    }
+
+    /// <summary>True while the dialog handle still names a live window.</summary>
+    private static bool DialogStillOpen(IntPtr dialog) => NativeMethods.IsWindow(dialog);
+
     private async Task OpenPanelAndWaitAsync(string mode)
     {
         _window.InvokeCommand(mode == "settings" ? MainWindow.IdSettings : mode == "history" ? MainWindow.IdHistory : MainWindow.IdBookmarks);
@@ -500,6 +534,40 @@ internal sealed partial class BrowserShell
         if (await FindPanelWindowAsync() == IntPtr.Zero)
         {
             throw new InvalidOperationException("The native " + mode + " panel window was not created.");
+        }
+    }
+
+    /// <summary>
+    /// Clears history through the panel's own action and its modal confirmation, then closes the
+    /// panel. Closing a panel after a modal dialog is the case where Windows stops returning focus
+    /// to the browser, so the shell has to do it.
+    /// </summary>
+    private async Task AssertPanelCloseReturnsFocusAsync()
+    {
+        await OpenPanelAndWaitAsync("history");
+        var panel = await FindPanelWindowAsync();
+
+        // The Clear action opens a modal confirmation owned by the panel. The message is posted,
+        // not sent: MessageBox runs its own modal loop and a send would not return until it closes.
+        NativeMethods.PostMessage(panel, NativeMethods.WM_COMMAND,
+            new IntPtr(InternalPanelWindow.IdClear), NativeMethods.GetDlgItem(panel, InternalPanelWindow.IdClear));
+        var dialog = await WaitForOwnedDialogAsync(TimeSpan.FromSeconds(5));
+        if (dialog == IntPtr.Zero) throw new InvalidOperationException("Clearing history opened no confirmation.");
+        var yes = NativeMethods.GetDlgItem(dialog, NativeMethods.IDYES);
+        if (yes == IntPtr.Zero) throw new InvalidOperationException("The confirmation offers no Yes action.");
+        NativeMethods.SendMessage(yes, NativeMethods.BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+        await WaitForAsync(() => !DialogStillOpen(dialog), TimeSpan.FromSeconds(5));
+
+        NativeMethods.SendMessage(panel, NativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        await WaitForAsync(() => _panelMode is null, TimeSpan.FromSeconds(10));
+
+        // The browser window must hold the thread's active window again; the panel is gone.
+        var active = NativeMethods.ActiveWindowOfThread(_window.Handle);
+        if (active != _window.Handle)
+        {
+            throw new InvalidOperationException(
+                "Closing the panel left the browser without focus: active window is 0x" + active.ToInt64().ToString("X") +
+                ", expected the main window 0x" + _window.Handle.ToInt64().ToString("X"));
         }
     }
 

@@ -49,6 +49,7 @@ internal static class NativeMethods
     internal const uint WM_PAINT = 0x000F;
     internal const uint WM_CLOSE = 0x0010;
     internal const uint WM_ERASEBKGND = 0x0014;
+    internal const uint BM_CLICK = 0x00F5;
     internal const uint WM_SETTINGCHANGE = 0x001A;
     internal const uint WM_SETREDRAW = 0x000B;
     internal const uint WM_KEYDOWN = 0x0100;
@@ -578,6 +579,47 @@ internal static class NativeMethods
 
     [DllImport(User32)]
     internal static extern IntPtr SetForegroundWindow(IntPtr hWnd);
+
+    /// <summary>The window holding the active state in a window's thread, or Zero on failure.</summary>
+    internal static IntPtr ActiveWindowOfThread(IntPtr hWnd)
+    {
+        var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
+        return GetGUIThreadInfo(ThreadOfWindow(hWnd), ref info) ? info.hwndActive : IntPtr.Zero;
+    }
+
+    /// <summary>True when a window belongs to the same process as a window of this application.</summary>
+    internal static bool IsOwnedByProcess(IntPtr hWnd, IntPtr applicationWindow)
+    {
+        if (hWnd == IntPtr.Zero) return false;
+        GetWindowThreadProcessId(hWnd, out var windowProcess);
+        GetWindowThreadProcessId(applicationWindow, out var applicationProcess);
+        return windowProcess == applicationProcess;
+    }
+
+    [DllImport(User32)]
+    internal static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport(User32)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    private static uint ThreadOfWindow(IntPtr hWnd) => GetWindowThreadProcessId(hWnd, out _);
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GUITHREADINFO
+    {
+        public uint cbSize;
+        public uint flags;
+        public IntPtr hwndActive;
+        public IntPtr hwndFocus;
+        public IntPtr hwndCapture;
+        public IntPtr hwndMenuOwner;
+        public IntPtr hwndMoveSize;
+        public IntPtr hwndCaret;
+        public RECT rcCaret;
+    }
+
+    [DllImport(User32)]
+    private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO info);
 
     [DllImport(User32)]
     internal static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
