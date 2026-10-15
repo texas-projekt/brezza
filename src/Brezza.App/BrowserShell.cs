@@ -42,6 +42,7 @@ internal sealed partial class BrowserShell : IDisposable
     private WebView2TabHostFactory? _hostFactory;
     private TabRegistry? _tabs;
     private TabRuntimeManager? _runtime;
+    private TabFaviconCache? _favicons;
     private ITabHost? _observedHost;
     private InternalPanelWindow? _panel;
 
@@ -52,7 +53,7 @@ internal sealed partial class BrowserShell : IDisposable
     public BrowserShell()
     {
         _localization = new Localization(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BrowserUi"));
-        _window = new MainWindow(_localization, _theme);
+        _window = new MainWindow(_localization, _theme, tabId => _favicons?.Image(tabId));
         WireWindow();
     }
 
@@ -163,7 +164,18 @@ internal sealed partial class BrowserShell : IDisposable
             _runtime.DownloadStatusChanged += OnDownloadStatusChanged;
             _runtime.PermissionRequested += OnPermissionRequested;
 
-            var session = _sessionStore!.Load();
+            // The favicon images are fetched by each tab's own host, so the shell only decodes and
+            // caches what Core already tracks as the tab's favicon URI.
+            _favicons = new TabFaviconCache(
+                tabId => _runtime is { } runtime ? runtime.GetFaviconAsync(tabId) : Task.FromResult<Stream?>(null),
+                () => _window.InvalidateTabStrip());
+
+            // The saved session is only opened when the user chose that startup behavior; the
+            // default is a single new-tab page. The session is still saved at shutdown, so turning
+            // the option on later restores what was open when the browser last closed.
+            var session = _settings?.StartupBehavior == BrowserStartupBehavior.RestoreSession
+                ? _sessionStore!.Load()
+                : new SessionStore.BrowserSession();
             foreach (var tab in session.Tabs!) _tabs.Restore(tab.Id, tab.Url, tab.Title);
             if (_tabs.Tabs.Count == 0) _tabs.Create();
 
@@ -334,7 +346,8 @@ internal sealed partial class BrowserShell : IDisposable
         if (_panel is null)
         {
             _panel = new InternalPanelWindow(_localization, _window.Handle, _theme);
-            _panel.SaveSettingsRequested += (_, submission) => SaveSettings(submission.SearchTemplate, submission.Language, submission.Theme);
+            _panel.SaveSettingsRequested += (_, submission) => SaveSettings(
+                submission.SearchTemplate, submission.Language, submission.Theme, submission.StartupBehavior);
             _panel.OpenUrlRequested += (_, url) => Observe(async () => await NavigateAsync(url));
             _panel.RemoveEntryRequested += (_, url) => RemoveEntry(url);
             _panel.ClearHistoryRequested += (_, _) => ClearHistory();
@@ -352,7 +365,8 @@ internal sealed partial class BrowserShell : IDisposable
         if (mode == "settings")
         {
             _panel.ShowSettings(_settings?.SearchTemplate ?? string.Empty, _settings?.Language ?? string.Empty,
-                _settings?.Theme ?? BrowserThemeMode.System);
+                _settings?.Theme ?? BrowserThemeMode.System,
+                _settings?.StartupBehavior ?? BrowserStartupBehavior.NewTab);
         }
         else
         {
@@ -387,7 +401,7 @@ internal sealed partial class BrowserShell : IDisposable
         RenderState();
     }
 
-    private void SaveSettings(string searchTemplate, string language, BrowserThemeMode theme)
+    private void SaveSettings(string searchTemplate, string language, BrowserThemeMode theme, BrowserStartupBehavior startupBehavior)
     {
         if (_settingsStore is null) return;
         try
@@ -397,6 +411,7 @@ internal sealed partial class BrowserShell : IDisposable
                 SearchTemplate = NavigationInputParser.ValidateTemplate(searchTemplate),
                 Language = BrowserSettings.NormalizeLanguage(language),
                 Theme = BrowserSettings.NormalizeTheme(theme),
+                StartupBehavior = BrowserSettings.NormalizeStartupBehavior(startupBehavior),
             };
             _settingsStore.Save(updated);
             _settings = updated;
@@ -495,6 +510,7 @@ internal sealed partial class BrowserShell : IDisposable
         var host = _runtime?.ActiveHost;
         var bookmarked = host is not null && _bookmarkStore?.Contains(host.Source) == true;
 
+        _favicons?.Sync(_tabs.Tabs);
         _window.UpdateTabs(_tabs.Tabs, active?.Id, host?.IsLoading == true);
         _window.UpdateNavigationState(host?.CanGoBack ?? false, host?.CanGoForward ?? false);
         _window.SetBookmarked(bookmarked);
@@ -784,6 +800,7 @@ internal sealed partial class BrowserShell : IDisposable
 
     public void Dispose()
     {
+        _favicons?.Dispose();
         _panel?.Dispose();
         _window.Dispose();
     }

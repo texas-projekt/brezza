@@ -79,6 +79,17 @@ internal static class NativePaint
 
     public static NativeMethods.RECT Rect(int x, int y, int width, int height) =>
         new() { left = x, top = y, right = x + width, bottom = y + height };
+
+    /// <summary>
+    /// Draws an image with alpha, scaled into the rectangle. A favicon is small and fetched at its
+    /// natural size, so it is stretched to the slot the tab strip reserves for it.
+    /// </summary>
+    public static void Image(IntPtr dc, Bitmap image, NativeMethods.RECT rect)
+    {
+        if (rect.Width <= 0 || rect.Height <= 0) return;
+        using var lease = NativePaintScope.Lease(dc);
+        lease.Graphics.DrawImage(image, new Rectangle(rect.left, rect.top, rect.Width, rect.Height));
+    }
 }
 
 /// <summary>

@@ -66,6 +66,9 @@ public sealed class WebView2TabHost : ITabHost
 
     public string Title => _controller?.CoreWebView2?.DocumentTitle ?? string.Empty;
 
+    /// <summary>The favicon URI the document reported, or empty when it has none.</summary>
+    public string FaviconUri => _controller?.CoreWebView2?.FaviconUri ?? string.Empty;
+
     public bool CanGoBack => _controller?.CoreWebView2?.CanGoBack ?? false;
 
     public bool CanGoForward => _controller?.CoreWebView2?.CanGoForward ?? false;
@@ -79,6 +82,8 @@ public sealed class WebView2TabHost : ITabHost
     public event EventHandler? SourceChanged;
 
     public event EventHandler? TitleChanged;
+
+    public event EventHandler? FaviconChanged;
 
     public event EventHandler? ProcessFailed;
 
@@ -238,6 +243,58 @@ public sealed class WebView2TabHost : ITabHost
     {
         ThrowIfDisposed();
         _controller?.CoreWebView2.Reload();
+    }
+
+    /// <summary>
+    /// The document's favicon image as a stream, or null when the document has none or the
+    /// controller is gone. The runtime fetches the image inside this host's profile, so the
+    /// request is the page's own; an empty image (a document without a favicon) is reported as
+    /// null. The caller owns the returned stream.
+    /// </summary>
+    public Task<Stream?> GetFaviconAsync()
+    {
+        // A host whose controller is gone (closed, or still being created) has no image to give;
+        // reporting null lets the caller keep the icon it already has.
+        if (_disposed || _controller is not { } controller) return Task.FromResult<Stream?>(null);
+        return FetchFaviconAsync(controller);
+    }
+
+    private static async Task<Stream?> FetchFaviconAsync(CoreWebView2Controller controller)
+    {
+        Stream? stream = null;
+        MemoryStream? buffer = null;
+        try
+        {
+            stream = await controller.CoreWebView2
+                .GetFaviconAsync(CoreWebView2FaviconImageFormat.Png)
+                .ConfigureAwait(true);
+
+            // The runtime hands out a COM stream wrapper that cannot be measured or seeked the way
+            // an image decoder needs, so the bytes are copied into memory first and only the copy
+            // leaves this method; the caller owns it.
+            buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer).ConfigureAwait(true);
+            if (buffer.Length == 0)
+            {
+                buffer.Dispose();
+                return null;
+            }
+
+            buffer.Position = 0;
+            return buffer;
+        }
+        catch (Exception exception)
+        {
+            // The controller can close or fail while the image is fetched, and a stream the decoder
+            // cannot read is the same outcome: the tab keeps the icon it already has.
+            buffer?.Dispose();
+            System.Diagnostics.Trace.TraceInformation("A tab favicon could not be fetched: {0}", exception.Message);
+            return null;
+        }
+        finally
+        {
+            stream?.Dispose();
+        }
     }
 
     /// <summary>
@@ -456,6 +513,7 @@ public sealed class WebView2TabHost : ITabHost
         core.FrameCreated += OnFrameCreated;
         core.SourceChanged += OnSourceChanged;
         core.DocumentTitleChanged += OnDocumentTitleChanged;
+        core.FaviconChanged += OnFaviconChanged;
         core.ProcessFailed += OnProcessFailed;
         core.NavigationCompleted += OnNavigationCompleted;
         core.NewWindowRequested += OnNewWindowRequested;
@@ -470,6 +528,7 @@ public sealed class WebView2TabHost : ITabHost
         core.FrameCreated -= OnFrameCreated;
         core.SourceChanged -= OnSourceChanged;
         core.DocumentTitleChanged -= OnDocumentTitleChanged;
+        core.FaviconChanged -= OnFaviconChanged;
         core.ProcessFailed -= OnProcessFailed;
         core.NavigationCompleted -= OnNavigationCompleted;
         core.NewWindowRequested -= OnNewWindowRequested;
@@ -482,6 +541,9 @@ public sealed class WebView2TabHost : ITabHost
 
     private void OnDocumentTitleChanged(object? sender, object args) =>
         TitleChanged?.Invoke(this, EventArgs.Empty);
+
+    private void OnFaviconChanged(object? sender, object args) =>
+        FaviconChanged?.Invoke(this, EventArgs.Empty);
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs args)
     {

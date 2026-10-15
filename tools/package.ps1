@@ -82,11 +82,15 @@ try {
     New-Item -ItemType Directory -Path $dataRoot -Force | Out-Null
 
     # Seed a restored session with a local page so the packaged app creates a WebView2 content host.
+    # Restoring the session is a stored startup choice, so the seeded settings turn it on.
     $pagePath = Join-Path $smokeRoot 'packaged-page.html'
     [System.IO.File]::WriteAllText($pagePath, '<!doctype html><html><head><title>Packaged Page</title></head><body><h1>Packaged</h1></body></html>')
     [System.IO.File]::WriteAllText(
         (Join-Path $dataRoot 'session.xml'),
         '<session schemaVersion="1" activeTabId="tab-1"><tab id="tab-1"><url>' + [System.Uri]::new($pagePath).AbsoluteUri + '</url><title>Packaged Page</title></tab></session>')
+    [System.IO.File]::WriteAllText(
+        (Join-Path $dataRoot 'settings.xml'),
+        '<settings schemaVersion="3"><searchTemplate>https://www.bing.com/search?q={query}</searchTemplate><startupBehavior>RestoreSession</startupBehavior></settings>')
 
     $source = @'
 using System;

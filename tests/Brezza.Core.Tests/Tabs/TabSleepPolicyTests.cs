@@ -65,6 +65,10 @@ public sealed class TabSleepPolicyTests
 
         public string Title => string.Empty;
 
+        public string FaviconUri => string.Empty;
+
+        public Task<Stream?> GetFaviconAsync() => Task.FromResult<Stream?>(null);
+
         public bool CanGoBack => false;
 
         public bool CanGoForward => false;
@@ -88,6 +92,8 @@ public sealed class TabSleepPolicyTests
         public event EventHandler? SourceChanged;
 
         public event EventHandler? TitleChanged;
+
+        public event EventHandler? FaviconChanged;
 
         public event EventHandler? ProcessFailed;
 

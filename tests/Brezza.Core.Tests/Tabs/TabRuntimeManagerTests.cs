@@ -1,3 +1,4 @@
+using System.IO;
 using Brezza.Core.Abstractions;
 using Brezza.Core.Downloads;
 using Brezza.Core.Permissions;
@@ -520,6 +521,62 @@ public sealed class TabRuntimeManagerTests
         Assert.Equal(BrowserSessionKind.Private, popup!.SessionKind);
     }
 
+    [Fact]
+    public async Task A_favicon_change_updates_the_tab_of_any_host()
+    {
+        // A favicon belongs to the tab that loaded the page, not to the active one, so a
+        // background tab keeps its icon while another tab is selected.
+        var context = await CreateTwoTabsAsync();
+
+        context.BackgroundHost.RaiseFavicon("https://background.example/favicon.ico");
+
+        Assert.Equal("https://background.example/favicon.ico", context.Background.FaviconUri);
+        Assert.Empty(context.Active.FaviconUri);
+    }
+
+    [Fact]
+    public async Task A_document_without_a_favicon_clears_the_previous_icon()
+    {
+        var context = await CreateTwoTabsAsync();
+        context.BackgroundHost.RaiseFavicon("https://background.example/favicon.ico");
+
+        context.BackgroundHost.RaiseFavicon(null);
+
+        Assert.Empty(context.Background.FaviconUri);
+    }
+
+    [Fact]
+    public async Task A_favicon_that_arrives_with_the_completed_navigation_is_recorded()
+    {
+        // An icon can be reported before or around the completion event; the completion syncs the
+        // favicon as well, so a page whose icon arrived with its load is not left without one.
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var activating = manager.ActivateAsync(tab.Id);
+        var host = factory.Complete();
+        await activating;
+        await host.NavigateAsync(new Uri("https://example.com/"));
+
+        host.RaiseFavicon("https://example.com/icon.png");
+        host.RaiseNavigationCompleted(true, "Success");
+
+        Assert.Equal("https://example.com/icon.png", registry.Find(tab.Id).FaviconUri);
+    }
+
+    [Fact]
+    public async Task A_tab_favicon_is_fetched_through_its_own_host()
+    {
+        var context = await CreateTwoTabsAsync();
+        var image = new MemoryStream(new byte[] { 1, 2, 3 });
+        context.BackgroundHost.Favicon = image;
+
+        Assert.Same(image, await context.Manager.GetFaviconAsync(context.Background.Id));
+        Assert.Null(await context.Manager.GetFaviconAsync(context.Active.Id));
+        Assert.Null(await context.Manager.GetFaviconAsync("tab-404"));
+    }
+
     private static async Task<TwoTabs> CreateTwoTabsAsync()
     {
         var registry = new TabRegistry();
@@ -602,6 +659,11 @@ public sealed class TabRuntimeManagerTests
 
         public string Title { get; private set; } = "New Tab";
 
+        public string FaviconUri { get; private set; } = string.Empty;
+
+        /// <summary>The image <see cref="GetFaviconAsync"/> hands out; null means the page has none.</summary>
+        public Stream? Favicon { get; set; }
+
         public bool CanGoBack => false;
 
         public bool CanGoForward => false;
@@ -627,6 +689,8 @@ public sealed class TabRuntimeManagerTests
         public event EventHandler? SourceChanged;
 
         public event EventHandler? TitleChanged;
+
+        public event EventHandler? FaviconChanged;
 
         public event EventHandler? ProcessFailed;
 
@@ -660,6 +724,14 @@ public sealed class TabRuntimeManagerTests
             Title = title;
             TitleChanged?.Invoke(this, EventArgs.Empty);
         }
+
+        public void RaiseFavicon(string? uri)
+        {
+            FaviconUri = uri ?? string.Empty;
+            FaviconChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        public Task<Stream?> GetFaviconAsync() => Task.FromResult(Favicon);
 
         public void RaiseProcessFailure() => ProcessFailed?.Invoke(this, EventArgs.Empty);
 

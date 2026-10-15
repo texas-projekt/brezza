@@ -269,6 +269,8 @@ internal static class NativeMethods
     internal const uint SWP_SHOWWINDOW = 0x0040;
     internal const uint SWP_HIDEWINDOW = 0x0080;
     internal const uint SWP_FRAMECHANGED = 0x0020;
+    internal const uint SWP_NOREDRAW = 0x0008;
+    internal const uint SWP_NOCOPYBITS = 0x0100;
 
     // ---------- Drawing ----------
     internal const uint DT_LEFT = 0x00000000;
@@ -635,6 +637,12 @@ internal static class NativeMethods
 
     [DllImport(User32, SetLastError = true)]
     internal static extern bool MoveWindow(IntPtr hWnd, int x, int y, int width, int height, bool repaint);
+
+    [DllImport(Gdi32, SetLastError = true)]
+    internal static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
+
+    [DllImport(User32, SetLastError = true)]
+    internal static extern int SetWindowRgn(IntPtr hWnd, IntPtr region, bool redraw);
 
     [DllImport(User32, SetLastError = true)]
     internal static extern bool SetWindowPos(

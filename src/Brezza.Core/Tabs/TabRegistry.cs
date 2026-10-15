@@ -82,12 +82,14 @@ public sealed class TabRegistry
     public BrowserTab Find(string tabId) =>
         _tabs.FirstOrDefault(tab => tab.Id == tabId) ?? throw new ArgumentException("Tab does not exist.", nameof(tabId));
 
-    internal void Update(string tabId, string? url = null, string? title = null, TabRuntimeState? state = null)
+    internal void Update(string tabId, string? url = null, string? title = null, TabRuntimeState? state = null, string? favicon = null)
     {
         if (!Contains(tabId)) return;
         var tab = Find(tabId);
         if (url is not null) tab.Url = url;
         if (title is not null) tab.Title = string.IsNullOrWhiteSpace(title) ? "New Tab" : title;
+        // A document without a favicon reports an empty URI, which clears the previous icon.
+        if (favicon is not null) tab.FaviconUri = favicon;
         if (state.HasValue) tab.State = state.Value;
         Changed?.Invoke(this, EventArgs.Empty);
     }

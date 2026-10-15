@@ -1,6 +1,6 @@
 # Brezza
 
-Brezza is a lightweight Windows browser built around a search-first workflow. Its shell is native Win32: the window, tab strip, address/search field, navigation buttons, notices, and settings/history/bookmark panels are real HWND controls, and WebView2 renders only website content in a separate surface. Search navigation, tabs, settings, local history, bookmarks, normal session restore, isolated private tabs, native System/Light/Dark themes, and the x64 framework-dependent package are implemented and smoke-tested. Basic downloads report their results, popup destinations open as tabs, and permission requests are denied with a notice until approval UI is added.
+Brezza is a lightweight Windows browser built around a search-first workflow. Its shell is native Win32: the window, tab strip, address/search field, navigation buttons, notices, and settings/history/bookmark panels are real HWND controls, and WebView2 renders only website content in a separate surface. Search navigation, tabs, settings, local history, bookmarks, opt-in session restore, isolated private tabs, native System/Light/Dark themes, and the x64 framework-dependent package are implemented and smoke-tested. Basic downloads report their results, popup destinations open as tabs, and permission requests are denied with a notice until approval UI is added.
 
 ## Build
 

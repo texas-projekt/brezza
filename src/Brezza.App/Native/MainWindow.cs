@@ -54,15 +54,25 @@ internal sealed class MainWindow : IDisposable
     private const int MinimumWindowWidth = 640;
     private const int MinimumWindowHeight = 420;
 
+    // The slot a tab's favicon occupies, and the gap between it and the label.
+    private const int TabIconSize = 16;
+
     // Unscaled metrics at 96 DPI.
     private const int CaptionHeight = 40;
     private const int TabTop = 6;
     private const int ToolbarHeight = 44;
     private const int NoticeHeight = 40;
     private const int CaptionButtonWidth = 46;
-    private const int CaptionButtonHeight = 32;
-    private const int MinimumTabWidth = 64;
     private const int MaximumTabWidth = 240;
+
+    // The active tab's close button: its widest size, the gap it keeps from its tab's edges, and
+    // how far it sits in from the tab's right edge. The minimum tab width is derived from these.
+    private const int TabCloseSize = 20;
+    private const int TabCloseMargin = 4;
+    private const int TabCloseInset = 8;
+
+    // The slot a private tab's leading marker is drawn in.
+    private const int TabPrivateMarkerWidth = 18;
 
     // Icon font glyphs (Segoe Fluent Icons, with Segoe MDL2 Assets code points).
     private const string GlyphBack = "\uE72B";
@@ -79,6 +89,9 @@ internal sealed class MainWindow : IDisposable
     private const string GlyphMaximize = "\uE922";
     private const string GlyphRestore = "\uE923";
     private const string GlyphCaptionClose = "\uE8BB";
+    // A globe: the icon a tab falls back to when its page has no favicon, since a page without one
+    // is still a page on the web.
+    private const string GlyphGlobe = "\uE774";
 
     private readonly NativeMethods.WndProc _wndProc;
     private readonly NativeMethods.SubClassProc _tabStripSubClass;
@@ -90,6 +103,10 @@ internal sealed class MainWindow : IDisposable
     private readonly FlatButtonSet _buttons;
     private readonly FlatFieldSet _fields;
     private readonly FlatPopup _menu;
+
+    // The tab favicons to paint, looked up per tab id. The window renders the images it is given
+    // and never fetches or caches them itself.
+    private readonly Func<string, System.Drawing.Bitmap?>? _favicons;
 
     private IntPtr _hwnd;
     private uint _dpi = NativeMethods.USER_DEFAULT_SCREEN_DPI;
@@ -118,6 +135,15 @@ internal sealed class MainWindow : IDisposable
     private readonly List<(string Id, string Text, bool Private)> _tabMirror = new();
     private int _hotTab = -1;
     private int _laidOutTabCount = -1;
+
+    // Past the point where every tab still fits at a readable width, the strip is wider than the
+    // space it shows and is moved sideways to scroll. Moving the strip window instead of letting
+    // the tab control overflow keeps its system scroll arrows from ever appearing.
+    private int _tabStripWidth;
+    private int _tabVisibleWidth;
+    private int _tabScrollOffset;
+    private int _tabMaxScroll;
+    private bool _tabStripScrollable;
     private string _currentUrl = string.Empty;
     private bool _noticeVisible;
     private bool _bookmarked;
@@ -125,10 +151,12 @@ internal sealed class MainWindow : IDisposable
     private string _startTitle = string.Empty;
     private string _startSubtitle = string.Empty;
 
-    public MainWindow(Localization localization, NativeThemeSource themeSource)
+    public MainWindow(Localization localization, NativeThemeSource themeSource,
+        Func<string, System.Drawing.Bitmap?>? favicons = null)
     {
         _localization = localization ?? throw new ArgumentNullException(nameof(localization));
         _themeSource = themeSource ?? throw new ArgumentNullException(nameof(themeSource));
+        _favicons = favicons;
         _theme = new NativeThemeResources(_themeSource);
         _themeSource.Changed += OnThemeChanged;
         _wndProc = OnWindowMessage;
@@ -382,6 +410,9 @@ internal sealed class MainWindow : IDisposable
             _tabMirror.AddRange(desired);
 
             var activeIndex = tabs.Select((tab, index) => (tab, index)).FirstOrDefault(pair => pair.tab.Id == activeTabId).index;
+            // Scroll to the new active tab before the selection moves, so the control's own repaint of
+            // the new selection and the strip's repaint at the new offset are one paint.
+            ScrollTabIntoView(activeIndex);
             NativeMethods.SendMessage(_tabStrip, NativeMethods.TCM_SETCURSEL, new IntPtr(activeIndex), IntPtr.Zero);
         }
         finally
@@ -402,6 +433,17 @@ internal sealed class MainWindow : IDisposable
         NativeMethods.EnableWindow(_backButton, canGoBack);
         NativeMethods.EnableWindow(_forwardButton, canGoForward);
         NativeMethods.EnableWindow(_reloadButton, _currentUrl.Length > 0);
+    }
+
+    /// <summary>
+    /// Repaints the tab strip. A favicon that finishes loading after its tab's last render needs
+    /// its own repaint; the strip is cheap to paint and this keeps the icon from waiting for the
+    /// next unrelated state change.
+    /// </summary>
+    public void InvalidateTabStrip()
+    {
+        if (_tabStrip == IntPtr.Zero) return;
+        NativeMethods.InvalidateRect(_tabStrip, IntPtr.Zero, false);
     }
 
     public void SetBookmarked(bool bookmarked)
@@ -938,6 +980,8 @@ internal sealed class MainWindow : IDisposable
         NativeMethods.GetClientRect(_hwnd, out var client);
         var width = Math.Max(0, client.Width);
         LayoutCaptionRow(width);
+        // A resize can leave the active tab outside the space the strip shows; bring it back.
+        EnsureTabVisible(SelectedTabIndex);
         LayoutToolbar(width);
         LayoutNotice(width);
 
@@ -949,7 +993,9 @@ internal sealed class MainWindow : IDisposable
     private void LayoutCaptionRow(int width)
     {
         var captionButtonWidth = Scale(CaptionButtonWidth);
-        var captionButtonHeight = Scale(CaptionButtonHeight);
+        // Caption buttons span the whole caption row, top to bottom, so their hover fill lines up
+        // with the full height of the tab band behind them.
+        var captionButtonHeight = Scale(CaptionHeight);
         NativeMethods.MoveWindow(_titleMinimize, width - captionButtonWidth * 3, 0, captionButtonWidth, captionButtonHeight, true);
         NativeMethods.MoveWindow(_titleMaximize, width - captionButtonWidth * 2, 0, captionButtonWidth, captionButtonHeight, true);
         NativeMethods.MoveWindow(_titleClose, width - captionButtonWidth, 0, captionButtonWidth, captionButtonHeight, true);
@@ -964,11 +1010,15 @@ internal sealed class MainWindow : IDisposable
     }
 
     /// <summary>
-    /// Sizes the tabs and the strip for a tab count and returns the strip's right edge. Tabs share the
-    /// space left of the new-tab button and a minimum drag area, and always fit: a tab control whose
+    /// Sizes the tabs and the strip for a tab count and returns the strip's visible right edge. Tabs
+    /// share the space left of the new-tab button and a minimum drag area, and never shrink below
+    /// <see cref="MinimumTabWidth"/>: past that point the strip is wider than the space it shows and
+    /// scrolls, so a title stays readable and every tab keeps its close target. A tab control whose
     /// items overflow scrolls them and adds its own system scroll arrows, which the custom painting
-    /// cannot follow. <see cref="UpdateTabs"/> calls this before inserting items, so the strip never
-    /// overflows, not even for the moment between inserting a tab and laying out.
+    /// cannot follow, so the strip window itself is moved to scroll instead and those arrows are
+    /// never given a reason to appear; scrolling has no visible control and follows the active tab,
+    /// which the wheel, a click on a partly visible tab, and Ctrl+Tab all move. <see cref="UpdateTabs"/>
+    /// calls this before inserting items, so the strip is never laid out for the wrong count.
     /// </summary>
     private int SizeTabStrip(int width, int tabCount)
     {
@@ -976,19 +1026,62 @@ internal sealed class MainWindow : IDisposable
         var tabHeight = Scale(CaptionHeight - TabTop);
         var stripLeft = Scale(NativeMetrics.SpaceSmall);
         var actionsWidth = Scale(NativeMetrics.SpaceXSmall) + Scale(NativeMetrics.ControlHeightCompact) + Scale(NativeMetrics.SpaceXSmall);
-        var available = Math.Max(Scale(MinimumTabWidth),
+        var available = Math.Max(MinimumTabWidth,
             width - stripLeft - actionsWidth - Scale(CaptionButtonWidth) * 3 - Scale(48));
         var count = Math.Max(1, tabCount);
         // The control indents the first item and widens the selected one, so keep some slack.
         var slack = Scale(8);
-        var tabWidth = Math.Max(1, Math.Min(Scale(MaximumTabWidth), (available - slack) / count));
+        // Dividing the room down rounds, so the tabs would fall a few pixels short of the band and
+        // the new-tab button would jiggle left and right as tabs are added. Rounding up instead
+        // fills the band as soon as the tabs reach it, and past that point the button stays put:
+        // the strip is wider than the room it shows, and it scrolls instead of resizing.
+        var share = (available - slack + count - 1) / count;
+        var tabWidth = Math.Max(MinimumTabWidth, Math.Min(Scale(MaximumTabWidth), share));
+        // Widen the strip before its items are laid out. The control builds its own system scroll
+        // arrows the moment its items do not fit the window it currently has, and it keeps them once
+        // built, so a strip widened only after its items are laid out leaves those arrows behind —
+        // hidden again at once, but already made, and they flash in the caption row. The window is
+        // moved without redrawing and its region still clips it to the band, so the extra width is
+        // never painted; it exists only so the items fit while the control measures them.
+        MoveTabStrip(Math.Max(_tabStripWidth, tabWidth * count + count + slack), _tabScrollOffset);
         NativeMethods.SendMessage(_tabStrip, NativeMethods.TCM_SETITEMSIZE, IntPtr.Zero,
             new IntPtr(NativeMethods.MakeLong(tabWidth, tabHeight)));
-        var stripWidth = Math.Min(available, tabWidth * count + slack);
-        NativeMethods.MoveWindow(_tabStrip, stripLeft, tabTop, stripWidth, tabHeight, true);
+        // Ask the control where its items really end instead of guessing. The control indents the
+        // first item and pads each one, so tabWidth * count falls short as tabs are added, and a
+        // strip whose items overflow makes the control build its own system scroll arrows — the one
+        // control the strip must never show. The last item's right edge is how far the items reach,
+        // and the window's region clips it to the band anyway, so room the items do not use costs
+        // nothing.
+        var lastItem = TabRect(count - 1);
+        _tabStripWidth = Math.Max(tabWidth * count + slack, lastItem.right + slack);
+        _tabStripScrollable = _tabStripWidth > available;
+        _tabVisibleWidth = Math.Min(available, _tabStripWidth);
+        _tabMaxScroll = Math.Max(0, _tabStripWidth - _tabVisibleWidth);
+        _tabScrollOffset = Math.Max(0, Math.Min(_tabScrollOffset, _tabMaxScroll));
+        // The strip is sized before it is painted, so clip it to the band first and move it without
+        // redrawing: a strip that has just grown past the band must never be painted at its full
+        // width, or it covers the controls beside it for a frame. The single repaint at the end shows
+        // the new size under the new region.
+        ClipTabStripToBand(repaintNeighbours: true);
+        MoveTabStrip(_tabStripWidth, _tabScrollOffset);
         HideTabScroller();
+        NativeMethods.InvalidateRect(_tabStrip, IntPtr.Zero, false);
         _laidOutTabCount = tabCount;
-        return stripLeft + stripWidth;
+        return stripLeft + _tabVisibleWidth;
+    }
+
+    /// <summary>
+    /// Sizes and places the strip window without repainting it. Nothing is drawn, so a caller can
+    /// put the window where it needs to be and let one later invalidation show the result: the strip
+    /// is never painted at a size or an offset it is about to leave.
+    /// </summary>
+    private void MoveTabStrip(int stripWidth, int offset)
+    {
+        NativeMethods.SetWindowPos(_tabStrip, NativeMethods.HWND_TOP,
+            Scale(NativeMetrics.SpaceSmall) - offset, Scale(TabTop),
+            stripWidth, Scale(CaptionHeight - TabTop),
+            NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE |
+            NativeMethods.SWP_NOREDRAW | NativeMethods.SWP_NOCOPYBITS);
     }
 
     private void LayoutToolbar(int width)
@@ -1093,8 +1186,10 @@ internal sealed class MainWindow : IDisposable
 
     /// <summary>
     /// Removes the tab control's overflow arrows. They are a system up-down control that ignores the
-    /// theme, and they are never needed because tabs are sized to fit; any scroll offset left from
-    /// an earlier overflow is reset first so the first tab is at the left edge again.
+    /// theme, and the strip is sized from where the control's own items end so they never overflow,
+    /// so they are never needed; any scroll offset left from an earlier overflow is reset first so
+    /// the first tab is at the left edge again. Kept as a safety net: a stray arrow would paint over
+    /// the themed strip.
     /// </summary>
     private void HideTabScroller()
     {
@@ -1106,7 +1201,100 @@ internal sealed class MainWindow : IDisposable
         NativeMethods.InvalidateRect(_tabStrip, IntPtr.Zero, false);
     }
 
-    /// <summary>Places the close button inside the right edge of the active tab.</summary>
+    /// <summary>Moves the strip by the current offset and keeps the close target with it.</summary>
+    private void ApplyTabScroll(bool repositionClose = true)
+    {
+        // One move, one clip, one repaint. The strip is moved without redrawing and the region is set
+        // without redrawing, so nothing is painted between the two: the strip is never seen at the
+        // new offset under the old region, and a scroll costs the strip a single repaint instead of a
+        // move-repaint, a region-repaint, and four repaints of the controls beside it that a scroll
+        // does not change.
+        MoveTabStrip(_tabStripWidth, _tabScrollOffset);
+        ClipTabStripToBand(repaintNeighbours: false);
+        NativeMethods.InvalidateRect(_tabStrip, IntPtr.Zero, false);
+        if (repositionClose) PositionTabClose();
+    }
+
+    /// <summary>
+    /// Clips the strip's window to the band it shows. The window is as wide as its items so the tab
+    /// control never scrolls them itself and never shows its system scroll arrows, but that width
+    /// runs past the new-tab button and the caption buttons, which sit below the strip in the
+    /// z-order: a strip scrolled away from its end would paint over them and erase them. The region
+    /// follows the scroll, so the band is always the visible part, and it moves the hit-testing with
+    /// it.
+    /// </summary>
+    /// <param name="repaintNeighbours">
+    /// Set when the band itself changed size, which is the only time the controls beside it can look
+    /// different. A scroll leaves the band exactly where it was on screen, so it repaints nothing
+    /// but the strip.
+    /// </param>
+    private void ClipTabStripToBand(bool repaintNeighbours)
+    {
+        if (_tabStrip == IntPtr.Zero) return;
+        var left = Math.Max(0, Math.Min(_tabScrollOffset, _tabStripWidth));
+        var right = Math.Max(left, Math.Min(_tabScrollOffset + _tabVisibleWidth, _tabStripWidth));
+        // The system owns the region handle once it is set, so a fresh one is built each time. The
+        // redraw flag is left off: the caller invalidates once, after the strip is in its final
+        // place, so the strip is never painted at the new offset under the old region.
+        NativeMethods.SetWindowRgn(_tabStrip,
+            NativeMethods.CreateRectRgn(left, 0, right, Scale(CaptionHeight - TabTop)), false);
+        if (!repaintNeighbours) return;
+        NativeMethods.InvalidateRect(_newTabButton, IntPtr.Zero, false);
+        NativeMethods.InvalidateRect(_titleMinimize, IntPtr.Zero, false);
+        NativeMethods.InvalidateRect(_titleMaximize, IntPtr.Zero, false);
+        NativeMethods.InvalidateRect(_titleClose, IntPtr.Zero, false);
+    }
+
+    /// <summary>
+    /// Scrolls the strip the least that brings a tab fully into view, as selecting it does, and keeps
+    /// the active tab's close button with it.
+    /// </summary>
+    private void EnsureTabVisible(int index)
+    {
+        ScrollTabIntoView(index);
+        PositionTabClose();
+    }
+
+    /// <summary>
+    /// Moves the strip the least that brings a tab fully into view and leaves the close button where
+    /// it is. A caller that is about to move the selection uses this, scrolls first, and positions
+    /// the button once afterwards: the tab control repaints on its own when the selection changes, so
+    /// scrolling before that change makes the control's repaint and the strip's repaint at the new
+    /// offset the same paint. Scrolling after it paints the row twice per step — once still at the old
+    /// offset — which reads as a flicker.
+    /// </summary>
+    private void ScrollTabIntoView(int index)
+    {
+        if (!_tabStripScrollable || index < 0 || index >= _tabMirror.Count) return;
+
+        var tab = TabRect(index);
+        // The strip window moves, so a tab's screen position is its own rect shifted by the offset.
+        var tabLeft = Scale(NativeMetrics.SpaceSmall) - _tabScrollOffset + tab.left;
+        var tabRight = Scale(NativeMetrics.SpaceSmall) - _tabScrollOffset + tab.right;
+        var rightEdge = Scale(NativeMetrics.SpaceSmall) + _tabVisibleWidth;
+        var margin = Scale(8);
+        if (tabLeft < margin)
+        {
+            _tabScrollOffset = Math.Max(0, _tabScrollOffset - (margin - tabLeft));
+        }
+        else if (tabRight > rightEdge - margin)
+        {
+            _tabScrollOffset = Math.Min(_tabMaxScroll, _tabScrollOffset + (tabRight - (rightEdge - margin)));
+        }
+        else
+        {
+            return;
+        }
+
+        ApplyTabScroll(repositionClose: false);
+    }
+
+    /// <summary>
+    /// Places the close button inside the right edge of the active tab. Tabs share the strip when
+    /// many are open, so a tab can end up narrower than the button: the button then shrinks and
+    /// centres on its own tab instead of covering its neighbours, and it is never hidden. A close
+    /// target that disappears as tabs multiply is a tab the user cannot close.
+    /// </summary>
     private void PositionTabClose()
     {
         var index = SelectedTabIndex;
@@ -1118,13 +1306,42 @@ internal sealed class MainWindow : IDisposable
         }
 
         var tab = TabRect(index);
-        var size = Scale(20);
         var origin = new NativeMethods.POINT { x = strip.left, y = strip.top };
         NativeMethods.ScreenToClient(_hwnd, ref origin);
-        var visible = tab.right <= strip.Width && tab.Width >= Scale(MinimumTabWidth);
+        var margin = Scale(TabCloseMargin);
+        // A narrow tab shrinks the button rather than losing it, down to a size the glyph fills.
+        var size = Math.Min(Scale(TabCloseSize), Math.Max(Scale(14), tab.Width - margin * 2));
+        var lowest = tab.left + margin;
+        var highest = tab.right - size - margin;
+        // Too narrow to sit inside with margins: centre the button on the tab it closes.
+        var left = highest <= lowest
+            ? tab.left + (tab.Width - size) / 2
+            : Math.Min(Math.Max(tab.right - size - Scale(TabCloseInset), lowest), highest);
+        var buttonLeft = origin.x + left;
+        // A strip that scrolls is wider than the space it shows, so the active tab can move out of
+        // sight; its close button goes with it instead of floating over the other caption buttons.
+        var bandRight = origin.x + _tabVisibleWidth + _tabScrollOffset;
+        var visible = buttonLeft >= 0 && buttonLeft + size <= bandRight;
         NativeMethods.MoveWindow(_closeActiveTabButton,
-            origin.x + tab.right - size - Scale(8), origin.y + (strip.Height - size) / 2, size, size, true);
+            buttonLeft, origin.y + (strip.Height - size) / 2, size, size, true);
         ShowControls(visible, _closeActiveTabButton);
+    }
+
+    /// <summary>
+    /// The narrowest a tab may be: its leading icon, the room its label needs to ellipsize, the
+    /// active tab's close button, and the margins both keep. A tab at the minimum width therefore
+    /// still shows its favicon and its close target instead of clipping either, and its label
+    /// narrows gradually instead of being dropped at a threshold.
+    /// </summary>
+    public int MinimumTabWidth
+    {
+        get
+        {
+            // What DrawText needs to draw the ellipsis a too-long label ends with.
+            var ellipsis = Math.Max(Scale(8), NativeFonts.Measure(_hwnd, _fonts.Body, "…").x);
+            return Scale(NativeMetrics.SpaceMedium) + Scale(TabIconSize) + Scale(NativeMetrics.SpaceXSmall) +
+                ellipsis + Scale(TabCloseSize) + Scale(TabCloseInset) + Scale(TabCloseMargin);
+        }
     }
 
     private void PaintTabStrip(IntPtr hWnd)
@@ -1176,18 +1393,72 @@ internal sealed class MainWindow : IDisposable
                 var textRect = rect;
                 textRect.left += padding;
                 textRect.right -= active ? Scale(32) : padding;
-                if (_tabMirror[index].Private)
+
+                var privateTab = _tabMirror[index].Private;
+                var label = _tabMirror[index].Text;
+
+                // Draws the tab's leading icon from x and returns where its label may start. A
+                // private tab leads with its private marker alone: the page's favicon and the
+                // built-in page icon would repeat what the marker already says. Every other tab
+                // leads with its favicon, or the built-in page icon when the page has none.
+                int DrawLead(int x)
                 {
-                    var glyphRect = textRect;
-                    glyphRect.right = glyphRect.left + Scale(18);
-                    NativePaint.Text(dc, GlyphPrivate, glyphRect, _fonts.SmallIcon, palette.Accent,
-                        NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
-                    textRect.left += Scale(18);
+                    if (privateTab)
+                    {
+                        NativePaint.Text(dc, GlyphPrivate,
+                            NativePaint.Rect(x, 0, Scale(TabPrivateMarkerWidth), client.Height),
+                            _fonts.SmallIcon, palette.Accent,
+                            NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+                        return x + Scale(TabPrivateMarkerWidth);
+                    }
+
+                    var iconSize = Scale(TabIconSize);
+                    var top = (client.Height - iconSize) / 2;
+                    var foreground = active ? palette.Text : palette.SecondaryText;
+                    if (_favicons?.Invoke(_tabMirror[index].Id) is { } icon)
+                    {
+                        NativePaint.Image(dc, icon, NativePaint.Rect(x, top, iconSize, iconSize));
+                    }
+                    else
+                    {
+                        // The page has no favicon, so the tab leads with the built-in globe from the
+                        // same icon font as every other glyph in the shell.
+                        NativePaint.Text(dc, GlyphGlobe, NativePaint.Rect(x, 0, iconSize, client.Height),
+                            _fonts.SmallIcon, foreground,
+                            NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+                    }
+
+                    return x + iconSize + Scale(NativeMetrics.SpaceXSmall);
                 }
 
-                NativePaint.Text(dc, _tabMirror[index].Text, textRect, _fonts.Body,
+                textRect.left = DrawLead(textRect.left);
+                // The label is always painted and ellipsized into the room that is left, so a tab
+                // narrows gradually instead of losing its label at a threshold.
+                NativePaint.Text(dc, label, textRect, _fonts.Body,
                     active ? palette.Text : palette.SecondaryText,
                     NativeMethods.DT_LEFT | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE | NativeMethods.DT_END_ELLIPSIS);
+            }
+
+            // A strip that scrolls says so with a thin indicator under the tabs. The track spans the
+            // band and the thumb's width is the share of the strip that is visible, so a small thumb
+            // means much is off screen and the thumb's place is where the view sits. It is the only
+            // affordance the scrolling has, it is drawn only while the strip can scroll, and it
+            // leaves with the scroll instead of dimming the tabs at the edges.
+            if (_tabStripScrollable)
+            {
+                var height = Scale(3);
+                var inset = Scale(4);
+                var track = NativePaint.Rect(_tabScrollOffset + inset, client.Height - inset - height,
+                    Math.Max(0, _tabVisibleWidth - inset * 2), height);
+                // The thumb never gets so small that it disappears on a long strip.
+                var thumbWidth = Math.Min(track.Width,
+                    Math.Max(Scale(24), track.Width * _tabVisibleWidth / _tabStripWidth));
+                var travel = track.Width - thumbWidth;
+                var thumbLeft = track.left + (_tabMaxScroll == 0 ? 0 : travel * _tabScrollOffset / _tabMaxScroll);
+                var thumbRadius = height / 2;
+                NativePaint.FillRounded(dc, track, thumbRadius, palette.Border, _theme);
+                NativePaint.FillRounded(dc, NativePaint.Rect(thumbLeft, track.top, thumbWidth, height),
+                    thumbRadius, palette.BorderHover, _theme);
             }
 
             NativeMethods.BitBlt(target, 0, 0, client.Width, client.Height, dc, 0, 0, NativeMethods.SRCCOPY);
@@ -1209,25 +1480,21 @@ internal sealed class MainWindow : IDisposable
         return Truncate(title);
     }
 
+    /// <summary>
+    /// A tab's label. A private tab already carries its privacy mark as its leading icon, so its
+    /// label stays the page's own title: a second "private" word in the label would repeat the mark.
+    /// </summary>
     private string DisplayTitle(BrowserTab tab)
     {
-        if (string.IsNullOrWhiteSpace(tab.Url))
-        {
-            return _localization.Get(tab.SessionKind == BrowserSessionKind.Private ? "tab.newPrivate" : "tab.new");
-        }
+        if (string.IsNullOrWhiteSpace(tab.Url)) return _localization.Get("tab.new");
 
         if (!string.IsNullOrWhiteSpace(tab.Title) && !string.Equals(tab.Title, "New Tab", StringComparison.Ordinal))
         {
-            return Decorate(tab, tab.Title);
+            return tab.Title;
         }
 
-        return Decorate(tab, FallbackTitle(tab.Url));
+        return FallbackTitle(tab.Url);
     }
-
-    private string Decorate(BrowserTab tab, string title) =>
-        tab.SessionKind == BrowserSessionKind.Private
-            ? _localization.Format("tab.privateLabel", "title", title)
-            : title;
 
     /// <summary>A readable label for a URL whose document title is not known yet.</summary>
     private string FallbackTitle(string url)
@@ -1335,9 +1602,14 @@ internal sealed class MainWindow : IDisposable
         var current = SelectedTabIndex;
         var next = current + step;
         if (next < 0 || next >= _tabMirror.Count) return;
+        // Scroll first, then move the selection. The control repaints for a selection change on its
+        // own, so this order makes that repaint and the strip's repaint at the new offset one paint;
+        // the other order paints the row twice per wheel step, once still at the old offset.
+        ScrollTabIntoView(next);
         NativeMethods.SendMessage(_tabStrip, NativeMethods.TCM_SETCURSEL, new IntPtr(next), IntPtr.Zero);
         // Programmatic TCM_SETCURSEL does not emit TCN_SELCHANGE. Keep Core's active tab
-        // synchronized when the user changes tabs with the wheel.
+        // synchronized when the user changes tabs with the wheel, and bring the new tab into view.
+        PositionTabClose();
         ActivateTabRequested?.Invoke(this, _tabMirror[next].Id);
     }
 
@@ -1533,6 +1805,7 @@ internal sealed class MainWindow : IDisposable
         if (header.code == NativeMethods.TCN_SELCHANGE)
         {
             var index = SelectedTabIndex;
+            EnsureTabVisible(index);
             PositionTabClose();
             if (index >= 0 && index < _tabMirror.Count)
             {

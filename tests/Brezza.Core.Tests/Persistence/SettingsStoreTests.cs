@@ -58,6 +58,37 @@ public sealed class SettingsStoreTests
         Assert.Equal(BrowserThemeMode.System, store.Load().Theme);
     }
 
+    [Fact]
+    public void Startup_behavior_defaults_to_the_new_tab_page_and_persists_the_choice()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "settings.xml");
+        var store = new SettingsStore(path);
+
+        // A profile without a settings file and a schema 2 file without the value both start from
+        // the new-tab page; the rest of the older file still applies.
+        Assert.Equal(BrowserStartupBehavior.NewTab, store.Load().StartupBehavior);
+        File.WriteAllText(path,
+            "<settings schemaVersion=\"2\"><searchTemplate>https://search.example/find?q={query}</searchTemplate><theme>Dark</theme></settings>");
+        var legacy = store.Load();
+        Assert.Equal(BrowserStartupBehavior.NewTab, legacy.StartupBehavior);
+        Assert.Equal(BrowserThemeMode.Dark, legacy.Theme);
+        Assert.Equal("https://search.example/find?q={query}", legacy.SearchTemplate);
+
+        store.Save(new BrowserSettings { StartupBehavior = BrowserStartupBehavior.RestoreSession });
+        Assert.Equal(BrowserStartupBehavior.RestoreSession, store.Load().StartupBehavior);
+    }
+
+    [Fact]
+    public void Unknown_startup_behavior_falls_back_to_the_new_tab_page()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "settings.xml");
+        File.WriteAllText(path, "<settings schemaVersion=\"3\"><startupBehavior>7</startupBehavior></settings>");
+
+        Assert.Equal(BrowserStartupBehavior.NewTab, new SettingsStore(path).Load().StartupBehavior);
+    }
+
     private sealed class TestDirectory : IDisposable
     {
         public TestDirectory()

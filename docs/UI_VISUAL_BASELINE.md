@@ -16,6 +16,10 @@ The screenshots are generated under `artifacts/` and are intentionally ignored b
 | Failure notice | `artifacts/brezza-notice-zorder.bmp` | Notice text visibility, dark notice palette, reload/dismiss actions |
 | Long notice text | `artifacts/brezza-notice-ellipsis.bmp` | Long detail text is ellipsized before the reload/dismiss actions |
 | Active-tab close affordance | `artifacts/brezza-close-tab-button.bmp` | Discoverable close button without tab-row overlap |
+| Many open tabs | `artifacts/brezza-tabs-floor.bmp` | Tabs keep the minimum width and the strip scrolls with no visible scroll control; the active tab's close button stays on screen |
+| Scrolling tab strip | `artifacts/brezza-tabs-indicator-middle.bmp` | A thin indicator under the tabs: the thumb's width is the share of the strip that is visible and its place is where the view sits; the new-tab and caption buttons stay visible while the strip scrolls |
+| Narrow tab icon | `artifacts/brezza-tabs-favicon.bmp` | Tabs ellipsize their label as they narrow; the leading icon (favicon or the built-in globe glyph) and the close button stay |
+| Tab without a favicon | `artifacts/brezza-tabs-globe.bmp` | A page with no favicon leads with the built-in globe glyph from the shell's icon font || Private tab mark | `artifacts/brezza-tabs-private.bmp` | A private tab leads with its private glyph alone and keeps the page's own title |
 | Tab-strip wheel switching | `artifacts/brezza-tabs-restored.bmp` | Wheel direction changes the Core active tab without disturbing the row |
 | Chinese native toolbar | `artifacts/brezza-smoke-zh-startup2.bmp` | Localized toolbar labels and private-tab action remain readable |
 | Loading tab title | `artifacts/brezza-loading-state.bmp` | Active tab shows a loading ellipsis without changing toolbar geometry |

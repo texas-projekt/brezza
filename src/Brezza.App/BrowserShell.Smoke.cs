@@ -37,8 +37,40 @@ internal sealed partial class BrowserShell
                 return;
             }
 
+            if (mode == "startup")
+            {
+                // The default startup behavior opens the new-tab page even though a session is
+                // saved; restoring it is a setting the user turns on.
+                await WaitForAsync(() => _runtime is not null, TimeSpan.FromSeconds(20));
+                if (_runtime?.ActiveHost is not null)
+                {
+                    throw new InvalidOperationException("A new tab created a content host before navigation.");
+                }
+
+                if (!_window.IsNewTabPageVisible)
+                {
+                    throw new InvalidOperationException("The default startup did not open the new-tab page.");
+                }
+
+                if (_tabs?.Tabs.Count != 1 || !string.IsNullOrEmpty(_tabs.ActiveTab?.Url))
+                {
+                    throw new InvalidOperationException(
+                        "The default startup did not start from one empty tab: tabs=" + _tabs?.Tabs.Count +
+                        " url=[" + _tabs?.ActiveTab?.Url + "]");
+                }
+
+                if (!string.IsNullOrEmpty(_window.AddressText))
+                {
+                    throw new InvalidOperationException("The default startup restored an address: " + _window.AddressText);
+                }
+
+                WriteSmokeResult(resultPath, "PASS: startup opens the new-tab page by default.");
+                await ShutdownAsync();
+                return;
+            }
+
             await RunInitialSmokeAsync(pageUri);
-            WriteSmokeResult(resultPath, "PASS: native controls, tabs, private cleanup, failure state, internal panel, and remote trust boundary.");
+            WriteSmokeResult(resultPath, "PASS: native controls, tabs, favicons, private cleanup, failure state, internal panel, and remote trust boundary.");
             await ShutdownAsync();
         }
         catch (Exception exception)
@@ -60,6 +92,7 @@ internal sealed partial class BrowserShell
                    " newTabPage=" + _window.IsNewTabPageVisible +
                    " panel=" + (_panelMode ?? "(none)") +
                    " activeTab=" + (_tabs?.ActiveTab?.Id ?? "(none)") + " [" + (_tabs?.ActiveTab?.Url ?? string.Empty) + "]" +
+                   " favicon=[" + (_tabs?.ActiveTab?.FaviconUri ?? string.Empty) + "]" +
                    " host=" + (_runtime?.ActiveHost?.Source ?? "(none)") +
                    " title=[" + _runtime?.ActiveHost?.Title + "]";
         }
@@ -165,6 +198,17 @@ internal sealed partial class BrowserShell
         {
             throw new InvalidOperationException("The native address field does not show the current page: " + _window.AddressText);
         }
+
+        // The tab shows the page's favicon: Core tracked the URI from the host's event, and the
+        // shell decoded the image the host fetched, ready for the strip to paint.
+        await WaitForAsync(() =>
+            _runtime?.ActiveHost is { FaviconUri.Length: > 0 } host &&
+            host.FaviconUri.StartsWith("data:image/png;base64,", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(10));
+        await WaitForAsync(() =>
+            _tabs?.ActiveTab is { FaviconUri.Length: > 0 } tab &&
+            _favicons?.Image(tab.Id) is not null,
+            TimeSpan.FromSeconds(10));
 
         await AssertRapidReloadIsStableAsync();
 
@@ -325,6 +369,108 @@ internal sealed partial class BrowserShell
         await WaitForAsync(() =>
             _runtime?.ActiveHost is { } host &&
             string.Equals(host.Source, pageUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(20));
+
+        // 12. A crowded strip must not cost the user the close button, and it must not shrink tabs
+        // into slivers either: tabs stop at the minimum width and the strip scrolls instead, with no
+        // visible scroll control and without the tab control's own system scroll arrows.
+        const int crowdedTabs = 30;
+
+        for (var extra = 1; extra < crowdedTabs; extra++)
+        {
+            ClickButton(MainWindow.IdNewTab);
+            await WaitForAsync(() => _tabs?.Tabs.Count == extra + 1, TimeSpan.FromSeconds(10));
+        }
+
+        var tabStrip = _window.GetControl(MainWindow.IdTabs);
+
+        // Tabs stop shrinking: at this count the old sizing would have squeezed every tab to a
+        // fraction of the minimum width to make them all fit. The minimum is what a tab's leading
+        // icon and its close button need, so a tab at it still shows both and only ellipsizes its
+        // label into the room that is left.
+        var activeItem = new NativeMethods.RECT();
+        NativeMethods.SendMessage(tabStrip, NativeMethods.TCM_GETITEMRECT,
+            new IntPtr(_window.SelectedTabIndex), ref activeItem);
+        if (activeItem.Width < _window.MinimumTabWidth)
+        {
+            throw new InvalidOperationException("Tabs kept shrinking past the minimum width with " +
+                _window.TabCount + " tabs open: " + activeItem.Width + "px.");
+        }
+
+        // The strip is therefore wider than the window's client area, so its tabs cannot all be
+        // showing: the strip scrolls.
+        NativeMethods.GetWindowRect(tabStrip, out var stripBox);
+        NativeMethods.GetClientRect(_window.Handle, out var client);
+        if (stripBox.Width <= client.Width)
+        {
+            throw new InvalidOperationException("A crowded tab strip is not wider than the window.");
+        }
+
+        // The tab control's own scroll arrows are a system control that ignores the theme. The
+        // strip is sized so its items never overflow, so they must never appear at all.
+        var systemScroller = NativeMethods.FindWindowEx(tabStrip, IntPtr.Zero, "msctls_updown32", null);
+        if (systemScroller != IntPtr.Zero && NativeMethods.IsWindowVisible(systemScroller))
+        {
+            throw new InvalidOperationException("The system tab scroll arrows are visible with " +
+                _window.TabCount + " tabs open.");
+        }
+
+        // The active tab was scrolled into view as it opened, so its close button is reachable.
+        if (!_window.IsControlVisible(MainWindow.IdCloseActiveTab))
+        {
+            throw new InvalidOperationException(
+                "The active-tab close button is hidden with " + _window.TabCount + " tabs open.");
+        }
+
+        AssertCloseButtonOnActiveTab();
+
+        // Scrolling follows the active tab: the wheel moves the selection and the strip follows it.
+        NativeMethods.SendMessage(tabStrip, NativeMethods.WM_MOUSEWHEEL,
+            new IntPtr(unchecked((int)(NativeMethods.WHEEL_DELTA << 16))), IntPtr.Zero);
+        await WaitForAsync(() => _tabs?.ActiveTab?.Id != "tab-" + crowdedTabs, TimeSpan.FromSeconds(10));
+        AssertCloseButtonOnActiveTab();
+
+        ClickButton(MainWindow.IdCloseActiveTab);
+        await WaitForAsync(() => _tabs?.Tabs.Count == crowdedTabs - 1, TimeSpan.FromSeconds(10));
+        // Close the rest through the same button, so the session is saved from one tab again.
+        for (var expected = crowdedTabs - 2; expected >= 1; expected--)
+        {
+            ClickButton(MainWindow.IdCloseActiveTab);
+            await WaitForAsync(() => _tabs?.Tabs.Count == expected, TimeSpan.FromSeconds(10));
+        }
+    }
+
+    /// <summary>The active tab's close button sits inside that tab's own edges, however narrow it is.</summary>
+    private void AssertCloseButtonOnActiveTab()
+    {
+        var closeButton = _window.GetControl(MainWindow.IdCloseActiveTab);
+        NativeMethods.GetWindowRect(closeButton, out var closeBox);
+        var tabStrip = _window.GetControl(MainWindow.IdTabs);
+        var activeItem = new NativeMethods.RECT();
+        NativeMethods.SendMessage(tabStrip, NativeMethods.TCM_GETITEMRECT,
+            new IntPtr(_window.SelectedTabIndex), ref activeItem);
+        NativeMethods.GetWindowRect(tabStrip, out var stripBox);
+        if (closeBox.Width < 14 || closeBox.Height < 14)
+        {
+            throw new InvalidOperationException("The close button fell below a clickable size with " +
+                _window.TabCount + " tabs open: " + closeBox.Width + "x" + closeBox.Height + ".");
+        }
+
+        // The strip has no border, so an item rectangle offsets straight from its screen origin.
+        var closeCenter = (closeBox.left + closeBox.right) / 2;
+        if (closeCenter < stripBox.left + activeItem.left || closeCenter > stripBox.left + activeItem.right)
+        {
+            throw new InvalidOperationException("The close button left the active tab with " +
+                _window.TabCount + " tabs open.");
+        }
+
+        // The strip scrolled the active tab into view, so the close button is on screen and clear
+        // of the new-tab button rather than hiding under it.
+        NativeMethods.GetWindowRect(_window.GetControl(MainWindow.IdNewTab), out var newTabBox);
+        if (closeBox.right > newTabBox.left)
+        {
+            throw new InvalidOperationException("The close button reaches past the tab band with " +
+                _window.TabCount + " tabs open.");
+        }
     }
 
     /// <summary>

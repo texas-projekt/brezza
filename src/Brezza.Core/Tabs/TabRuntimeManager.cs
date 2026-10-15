@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -227,6 +228,19 @@ public sealed class TabRuntimeManager
     public void Reload() => ActiveHost?.Reload();
 
     /// <summary>
+    /// A tab's favicon image, or null when the tab has no live host (a new, internal, or sleeping
+    /// tab) or its document has no favicon. The image is fetched by the tab's own host, so the
+    /// request stays inside that page's profile and network stack.
+    /// </summary>
+    public Task<Stream?> GetFaviconAsync(string tabId)
+    {
+        if (_disposed || !_registry.Contains(tabId)) return Task.FromResult<Stream?>(null);
+        return _hosts.TryGetValue(tabId, out var host)
+            ? host.GetFaviconAsync()
+            : Task.FromResult<Stream?>(null);
+    }
+
+    /// <summary>
     /// Releases an inactive tab host, but only when the host is eligible: not loading, not playing
     /// audio, and not showing a full-screen element. Returns the outcome so the caller can report why
     /// a tab was kept alive.
@@ -428,6 +442,7 @@ public sealed class TabRuntimeManager
             _hosts.Add(tab.Id, host);
             host.SourceChanged += (_, _) => _registry.Update(tab.Id, url: host.Source);
             host.TitleChanged += (_, _) => _registry.Update(tab.Id, title: host.Title);
+            host.FaviconChanged += (_, _) => _registry.Update(tab.Id, favicon: host.FaviconUri);
             // A load that was replaced or cancelled also ends unsuccessfully. Remember whether the
             // last completion was one, so it does not mark the tab as failed.
             var lastCompletionNotAFailure = false;
@@ -455,7 +470,10 @@ public sealed class TabRuntimeManager
                     // A page that loads after a failure (a reload, or any later navigation) ends the
                     // failure; the tab is live again.
                     var recovered = _registry.Contains(tab.Id) && _registry.Find(tab.Id).State == TabRuntimeState.Failed;
+                    // The favicon is synced here as well as on its own event: an icon that arrived
+                    // around this completion is not lost when no further change follows it.
                     _registry.Update(tab.Id, url: host.Source, title: host.Title,
+                        favicon: host.FaviconUri,
                         state: recovered ? TabRuntimeState.Active : null);
                 }
 

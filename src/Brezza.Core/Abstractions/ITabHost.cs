@@ -1,3 +1,4 @@
+using System.IO;
 using System.Threading.Tasks;
 using Brezza.Core.Tabs;
 
@@ -8,6 +9,12 @@ public interface ITabHost : IDisposable
     string Source { get; }
 
     string Title { get; }
+
+    /// <summary>
+    /// The favicon image URI of the current document, or empty when the document has none. The
+    /// image itself is fetched with <see cref="GetFaviconAsync"/>, never by the shell.
+    /// </summary>
+    string FaviconUri { get; }
 
     bool CanGoBack { get; }
 
@@ -48,6 +55,13 @@ public interface ITabHost : IDisposable
     /// <summary>Tells pages whether the browser chrome is dark, through the CSS prefers-color-scheme media feature. Pages that define their own colors keep them.</summary>
     void SetPrefersDarkColorScheme(bool dark);
 
+    /// <summary>
+    /// The current document's favicon image as an encoded stream, or null when the document has
+    /// none or no host exists. The host fetches it, so the request stays inside the page's own
+    /// profile and network stack; the caller owns the returned stream.
+    /// </summary>
+    Task<Stream?> GetFaviconAsync();
+
     Task NavigateAsync(Uri uri);
 
     void GoBack();
@@ -59,6 +73,9 @@ public interface ITabHost : IDisposable
     event EventHandler? SourceChanged;
 
     event EventHandler? TitleChanged;
+
+    /// <summary>The current document's favicon URI changed, including to empty when it has none.</summary>
+    event EventHandler? FaviconChanged;
 
     event EventHandler? ProcessFailed;
 

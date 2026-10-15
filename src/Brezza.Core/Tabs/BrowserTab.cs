@@ -28,5 +28,12 @@ public sealed class BrowserTab
 
     public string Title { get; internal set; }
 
+    /// <summary>
+    /// The favicon image URI the current document reported, or empty when the document has none.
+    /// Core tracks the URI only; the image is fetched through the tab's host, so it stays inside
+    /// the page's own profile and network stack.
+    /// </summary>
+    public string FaviconUri { get; internal set; } = string.Empty;
+
     public TabRuntimeState State { get; internal set; }
 }

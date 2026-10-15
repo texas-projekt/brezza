@@ -33,11 +33,12 @@ internal readonly struct PanelEntry
 /// <summary>Settings the user submitted from the native settings panel.</summary>
 internal readonly struct SettingsSubmission
 {
-    public SettingsSubmission(string searchTemplate, string language, BrowserThemeMode theme)
+    public SettingsSubmission(string searchTemplate, string language, BrowserThemeMode theme, BrowserStartupBehavior startupBehavior)
     {
         SearchTemplate = searchTemplate;
         Language = language;
         Theme = theme;
+        StartupBehavior = startupBehavior;
     }
 
     public string SearchTemplate { get; }
@@ -45,6 +46,8 @@ internal readonly struct SettingsSubmission
     public string Language { get; }
 
     public BrowserThemeMode Theme { get; }
+
+    public BrowserStartupBehavior StartupBehavior { get; }
 }
 
 /// <summary>
@@ -79,6 +82,8 @@ internal sealed class InternalPanelWindow : IDisposable
     public const int IdTheme = 2020;
     public const int IdEmpty = 2021;
     public const int IdSubtitle = 2022;
+    public const int IdStartupLabel = 2023;
+    public const int IdStartup = 2024;
 
     // Unscaled metrics at 96 DPI.
     private const int ListRowHeight = 48;
@@ -109,6 +114,8 @@ internal sealed class InternalPanelWindow : IDisposable
     private IntPtr _languageCombo;
     private IntPtr _themeLabel;
     private IntPtr _themeCombo;
+    private IntPtr _startupLabel;
+    private IntPtr _startupCombo;
     private IntPtr _statusText;
     private IntPtr _filterEdit;
     private IntPtr _listView;
@@ -127,6 +134,7 @@ internal sealed class InternalPanelWindow : IDisposable
     private string _savedTemplate = string.Empty;
     private string _savedLanguage = string.Empty;
     private BrowserThemeMode _savedTheme = BrowserThemeMode.System;
+    private BrowserStartupBehavior _savedStartup = BrowserStartupBehavior.NewTab;
     private string? _statusKey;
 
     public InternalPanelWindow(Localization localization, IntPtr owner, NativeThemeSource themeSource)
@@ -156,19 +164,20 @@ internal sealed class InternalPanelWindow : IDisposable
     private IntPtr[] SettingsControls => new[]
     {
         _presetLabel, _presetCombo, _templateLabel, _templateEdit, _languageLabel, _languageCombo,
-        _themeLabel, _themeCombo, _statusText, _saveButton, _cancelButton,
+        _themeLabel, _themeCombo, _startupLabel, _startupCombo, _statusText, _saveButton, _cancelButton,
     };
 
     private IntPtr[] ListControls => new[] { _filterEdit, _listView, _emptyText };
 
     // ---------- Presentation ----------
 
-    public void ShowSettings(string template, string language, BrowserThemeMode theme)
+    public void ShowSettings(string template, string language, BrowserThemeMode theme, BrowserStartupBehavior startupBehavior)
     {
         _mode = InternalPanelMode.Settings;
         _savedTemplate = template;
         _savedLanguage = language;
         _savedTheme = BrowserSettings.NormalizeTheme(theme);
+        _savedStartup = BrowserSettings.NormalizeStartupBehavior(startupBehavior);
         _statusKey = null;
         EnsureCreated();
         ApplyLanguage();
@@ -177,6 +186,7 @@ internal sealed class InternalPanelWindow : IDisposable
         SelectLanguage(language);
         SelectPreset(template);
         SelectTheme(_savedTheme);
+        SelectStartup(_savedStartup);
         ApplyModeVisibility();
         UpdateDirty();
         Present();
@@ -218,6 +228,7 @@ internal sealed class InternalPanelWindow : IDisposable
             _savedTemplate = NativeMethods.GetWindowText(_templateEdit).Trim();
             _savedLanguage = LanguageValue();
             _savedTheme = ThemeValue();
+            _savedStartup = StartupValue();
         }
 
         SetStatus(saved ? "settings.saved" : "settings.invalid");
@@ -240,6 +251,7 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.SetWindowText(_templateLabel, _localization.Get("settings.searchUrl"));
         NativeMethods.SetWindowText(_languageLabel, _localization.Get("settings.language"));
         NativeMethods.SetWindowText(_themeLabel, _localization.Get("settings.theme"));
+        NativeMethods.SetWindowText(_startupLabel, _localization.Get("settings.startup"));
         NativeMethods.SendMessage(_filterEdit, 0x1501 /* EM_SETCUEBANNER */, new IntPtr(1),
             _localization.Get(history ? "history.search" : "bookmarks.search"));
         NativeMethods.SetWindowText(_emptyText, _localization.Get(history ? "history.empty" : "bookmarks.empty"));
@@ -251,6 +263,7 @@ internal sealed class InternalPanelWindow : IDisposable
         RebuildPresetList();
         RebuildLanguageList();
         RebuildThemeList();
+        RebuildStartupList();
         Layout();
         NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
     }
@@ -379,7 +392,7 @@ internal sealed class InternalPanelWindow : IDisposable
             return;
         }
 
-        if ((controlId == IdLanguage || controlId == IdTheme) && notification == NativeMethods.CBN_SELCHANGE)
+        if ((controlId == IdLanguage || controlId == IdTheme || controlId == IdStartup) && notification == NativeMethods.CBN_SELCHANGE)
         {
             UpdateDirty();
             return;
@@ -534,6 +547,8 @@ internal sealed class InternalPanelWindow : IDisposable
         _languageCombo = CreateChild(hWnd, "COMBOBOX", IdLanguage, combo);
         _themeLabel = CreateChild(hWnd, "STATIC", IdThemeLabel, label);
         _themeCombo = CreateChild(hWnd, "COMBOBOX", IdTheme, combo);
+        _startupLabel = CreateChild(hWnd, "STATIC", IdStartupLabel, label);
+        _startupCombo = CreateChild(hWnd, "COMBOBOX", IdStartup, combo);
         _statusText = CreateChild(hWnd, "STATIC", IdStatus, label | NativeMethods.SS_ENDELLIPSIS);
         _filterEdit = CreateChild(hWnd, "EDIT", IdFilter, edit);
         _listView = CreateChild(hWnd, "LISTBOX", IdList,
@@ -545,7 +560,7 @@ internal sealed class InternalPanelWindow : IDisposable
         _cancelButton = CreateButton(hWnd, IdCancel, FlatButtonStyle.Subtle);
         NativeMethods.SetWindowSubclass(_listView, _listSubclass, new UIntPtr(0xA1), IntPtr.Zero);
 
-        foreach (var field in new[] { _presetCombo, _languageCombo, _themeCombo })
+        foreach (var field in new[] { _presetCombo, _languageCombo, _themeCombo, _startupCombo })
             _fields.RegisterCombo(field, FlatBackdrop.Surface);
         foreach (var field in new[] { _templateEdit, _filterEdit })
             _fields.RegisterEdit(field, FlatBackdrop.Surface);
@@ -652,6 +667,15 @@ internal sealed class InternalPanelWindow : IDisposable
         }, CurrentSelection(_themeCombo, ThemeIndex(_savedTheme)));
     }
 
+    private void RebuildStartupList()
+    {
+        FillCombo(_startupCombo, new[]
+        {
+            _localization.Get("settings.startupNewTab"),
+            _localization.Get("settings.startupRestore"),
+        }, CurrentSelection(_startupCombo, StartupIndex(_savedStartup)));
+    }
+
     private static int CurrentSelection(IntPtr combo, int fallback)
     {
         var selected = (int)NativeMethods.SendMessage(combo, NativeMethods.CB_GETCURSEL, IntPtr.Zero, IntPtr.Zero);
@@ -672,6 +696,9 @@ internal sealed class InternalPanelWindow : IDisposable
     private void SelectTheme(BrowserThemeMode theme) =>
         NativeMethods.SendMessage(_themeCombo, NativeMethods.CB_SETCURSEL, new IntPtr(ThemeIndex(theme)), IntPtr.Zero);
 
+    private void SelectStartup(BrowserStartupBehavior behavior) =>
+        NativeMethods.SendMessage(_startupCombo, NativeMethods.CB_SETCURSEL, new IntPtr(StartupIndex(behavior)), IntPtr.Zero);
+
     private void SelectPreset(string template)
     {
         var presets = SearchProviderPresets.All;
@@ -687,6 +714,10 @@ internal sealed class InternalPanelWindow : IDisposable
         BrowserThemeMode.Dark => 2,
         _ => 0,
     };
+
+    /// <summary>Index of a startup value in the settings combo: new tab page, last session.</summary>
+    private static int StartupIndex(BrowserStartupBehavior behavior) =>
+        behavior == BrowserStartupBehavior.RestoreSession ? 1 : 0;
 
     /// <summary>Index of a language value in the settings combo: system, English, Chinese.</summary>
     private static int LanguageIndex(string? language) => language switch
@@ -714,7 +745,7 @@ internal sealed class InternalPanelWindow : IDisposable
     private void SaveSettings()
     {
         var template = NativeMethods.GetWindowText(_templateEdit).Trim();
-        SaveSettingsRequested?.Invoke(this, new SettingsSubmission(template, LanguageValue(), ThemeValue()));
+        SaveSettingsRequested?.Invoke(this, new SettingsSubmission(template, LanguageValue(), ThemeValue(), StartupValue()));
     }
 
     /// <summary>Cancel works like a dialog's Cancel: unsaved changes are dropped and the panel closes.</summary>
@@ -723,6 +754,7 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.SetWindowText(_templateEdit, _savedTemplate);
         SelectLanguage(_savedLanguage);
         SelectTheme(_savedTheme);
+        SelectStartup(_savedStartup);
         SelectPreset(_savedTemplate);
         SetStatus(null);
         CloseRequested?.Invoke(this, EventArgs.Empty);
@@ -735,7 +767,8 @@ internal sealed class InternalPanelWindow : IDisposable
         var dirty =
             !string.Equals(NativeMethods.GetWindowText(_templateEdit).Trim(), _savedTemplate, StringComparison.Ordinal) ||
             !string.Equals(LanguageValue(), _savedLanguage, StringComparison.Ordinal) ||
-            ThemeValue() != _savedTheme;
+            ThemeValue() != _savedTheme ||
+            StartupValue() != _savedStartup;
         NativeMethods.EnableWindow(_saveButton, dirty);
         // A pending change replaces the last save result, which no longer describes the form.
         if (dirty && _statusKey == "settings.saved") SetStatus(null);
@@ -761,6 +794,12 @@ internal sealed class InternalPanelWindow : IDisposable
             2 => BrowserThemeMode.Dark,
             _ => BrowserThemeMode.System,
         };
+    }
+
+    private BrowserStartupBehavior StartupValue()
+    {
+        var index = (int)NativeMethods.SendMessage(_startupCombo, NativeMethods.CB_GETCURSEL, IntPtr.Zero, IntPtr.Zero);
+        return index == 1 ? BrowserStartupBehavior.RestoreSession : BrowserStartupBehavior.NewTab;
     }
 
     private void SetStatus(string? key)
@@ -1052,6 +1091,7 @@ internal sealed class InternalPanelWindow : IDisposable
         {
             (_presetLabel, _presetCombo), (_templateLabel, _templateEdit),
             (_languageLabel, _languageCombo), (_themeLabel, _themeCombo),
+            (_startupLabel, _startupCombo),
         };
         var labelWidth = rows.Max(row => NativeFonts.Measure(_hwnd, _fonts.Body, NativeMethods.GetWindowText(row.Item1)).x);
         labelWidth = Math.Min(labelWidth + Scale(16), width / 2);

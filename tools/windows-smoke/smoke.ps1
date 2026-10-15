@@ -7,7 +7,19 @@ $runRoot = Join-Path $projectRoot ('.test-data\smoke-' + [guid]::NewGuid().ToStr
 if (-not (Test-Path $exePath)) { throw 'Build Brezza.slnx in Debug before running the UI smoke test.' }
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 $pagePath = Join-Path $runRoot 'smoke.html'
-[System.IO.File]::WriteAllText($pagePath, '<!doctype html><html><head><title>Brezza Smoke Page</title></head><body><h1>Smoke Pass</h1></body></html>')
+# The page's favicon is a data URI: the tab strip decodes and paints it, which the smoke uses to
+# verify the favicon reaches the tab end to end without depending on a separate favicon fetch.
+Add-Type -AssemblyName System.Drawing
+$faviconBitmap = New-Object System.Drawing.Bitmap(16, 16)
+$faviconGraphics = [System.Drawing.Graphics]::FromImage($faviconBitmap)
+$faviconGraphics.Clear([System.Drawing.Color]::FromArgb(0, 120, 215))
+$faviconGraphics.Dispose()
+$faviconStream = New-Object System.IO.MemoryStream
+$faviconBitmap.Save($faviconStream, [System.Drawing.Imaging.ImageFormat]::Png)
+$faviconBitmap.Dispose()
+$faviconBase64 = [System.Convert]::ToBase64String($faviconStream.ToArray())
+$faviconStream.Dispose()
+[System.IO.File]::WriteAllText($pagePath, '<!doctype html><html><head><title>Brezza Smoke Page</title><link rel="icon" href="data:image/png;base64,' + $faviconBase64 + '"></head><body><h1>Smoke Pass</h1></body></html>')
 # Trust probe: a remote document must not reach the host bridge, read browser UI assets, frame a
 # browser-owned page, or navigate into the trusted origin on its own.
 [System.IO.File]::WriteAllText(
@@ -91,8 +103,20 @@ try {
     $savedUrl = [string]$sessionDocument.session.tab.url
     if ($savedUrl -ne $env:BREZZA_SMOKE_PAGE) { throw "Session did not save the expected page: '$savedUrl'." }
 
+    # Restoring the saved session is an opt-in startup behavior, so the second process only sees
+    # the saved page once the setting asks for it.
+    [System.IO.File]::WriteAllText(
+        (Join-Path $runRoot 'settings.xml'),
+        '<settings schemaVersion="3"><searchTemplate>https://www.bing.com/search?q={query}</searchTemplate><language>zh-Hans</language><startupBehavior>RestoreSession</startupBehavior></settings>')
     $restored = Invoke-SmokeProcess 'restore' (Join-Path $runRoot 'smoke-restore.txt')
-    "PASS: $first; $restored"
+
+    # The default behavior ignores the same saved session and starts from the new-tab page.
+    [System.IO.File]::WriteAllText(
+        (Join-Path $runRoot 'settings.xml'),
+        '<settings schemaVersion="3"><searchTemplate>https://www.bing.com/search?q={query}</searchTemplate><language>zh-Hans</language><startupBehavior>NewTab</startupBehavior></settings>')
+    $startup = Invoke-SmokeProcess 'startup' (Join-Path $runRoot 'smoke-startup.txt')
+
+    "PASS: $first; $restored; $startup"
 }
 finally {
     if ($null -eq $previous.DataRoot) { Remove-Item Env:BREZZA_DATA_DIR -ErrorAction SilentlyContinue }
