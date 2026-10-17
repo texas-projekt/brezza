@@ -92,6 +92,25 @@ public interface ITabHost : IDisposable
     /// <summary>A download changed state.</summary>
     event EventHandler<DownloadStatusChangedEventArgs>? DownloadStatusChanged;
 
+    /// <summary>More of a running download arrived.</summary>
+    event EventHandler<DownloadProgressChangedEventArgs>? DownloadProgressChanged;
+
+    /// <summary>
+    /// Pauses the download written to <paramref name="targetFilePath"/>. The runtime keeps the
+    /// partial file and the bytes it already has. Returns false when no such download is running.
+    /// </summary>
+    bool TryPauseDownload(string targetFilePath);
+
+    /// <summary>Resumes a paused download. Returns false when no such download is paused.</summary>
+    bool TryResumeDownload(string targetFilePath);
+
+    /// <summary>
+    /// Cancels the download written to <paramref name="targetFilePath"/> and drops the partial
+    /// file. The runtime reports the cancellation as an interruption. Returns false when no such
+    /// download is running.
+    /// </summary>
+    bool TryCancelDownload(string targetFilePath);
+
     /// <summary>A page asked for a capability and the browser answered it.</summary>
     event EventHandler<PermissionRequestedEventArgs>? PermissionRequested;
 }

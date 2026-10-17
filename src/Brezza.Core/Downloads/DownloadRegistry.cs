@@ -76,6 +76,30 @@ public sealed class DownloadRegistry
         return ReportTerminal(targetFilePath, new PendingStatus(BrowserDownloadState.Interrupted, null, interruptReason));
     }
 
+    /// <summary>Records that the download written to <paramref name="targetFilePath"/> was paused.</summary>
+    public BrowserDownload? Pause(string targetFilePath) => SetLiveState(targetFilePath, BrowserDownloadState.Paused);
+
+    /// <summary>Records that a paused download is running again.</summary>
+    public BrowserDownload? Resume(string targetFilePath) => SetLiveState(targetFilePath, BrowserDownloadState.InProgress);
+
+    /// <summary>Records how many bytes of the download have arrived.</summary>
+    public BrowserDownload? ReportProgress(string targetFilePath, ulong receivedBytes)
+    {
+        BrowserDownload? updated = null;
+        lock (_downloads)
+        {
+            var index = FindIndex(targetFilePath);
+            if (index >= 0)
+            {
+                updated = _downloads[index].WithProgress(receivedBytes);
+                _downloads[index] = updated;
+            }
+        }
+
+        if (updated is not null) Changed?.Invoke(this, EventArgs.Empty);
+        return updated;
+    }
+
     /// <summary>
     /// Adds a download restored from the local store. Entries are appended in the order they are
     /// given, so a store that hands them newest first — as <see cref="Persistence.DownloadStore"/>
@@ -132,12 +156,33 @@ public sealed class DownloadRegistry
         return removed;
     }
 
+    private BrowserDownload? SetLiveState(string targetFilePath, BrowserDownloadState state)
+    {
+        BrowserDownload? updated = null;
+        lock (_downloads)
+        {
+            var index = FindIndex(targetFilePath);
+            if (index >= 0)
+            {
+                updated = _downloads[index].WithState(state);
+                _downloads[index] = updated;
+            }
+        }
+
+        if (updated is not null) Changed?.Invoke(this, EventArgs.Empty);
+        return updated;
+    }
+
+    /// <summary>Finds a download by the file it is written to. Caller holds the list lock.</summary>
+    private int FindIndex(string targetFilePath) =>
+        _downloads.FindIndex(item => string.Equals(item.TargetFilePath, targetFilePath, StringComparison.OrdinalIgnoreCase));
+
     private BrowserDownload? ReportTerminal(string targetFilePath, PendingStatus status)
     {
         BrowserDownload? updated = null;
         lock (_downloads)
         {
-            var index = _downloads.FindIndex(item => string.Equals(item.TargetFilePath, targetFilePath, StringComparison.OrdinalIgnoreCase));
+            var index = FindIndex(targetFilePath);
             if (index >= 0)
             {
                 updated = ApplyStatus(_downloads[index], status);

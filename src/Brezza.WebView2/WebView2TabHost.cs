@@ -19,7 +19,11 @@ public sealed class WebView2TabHost : ITabHost
     private readonly CoreWebView2Environment _environment;
     private readonly IntPtr _parentWindow;
     private readonly CoreWebView2ControllerOptions _controllerOptions;
-    private readonly string _downloadsFolder;
+    private readonly Func<string> _downloadsFolder;
+
+    // The downloads this host is running, by the file each writes to. A command from the panel
+    // reaches the operation through this map, so it works whatever tab is active.
+    private readonly Dictionary<string, CoreWebView2DownloadOperation> _downloads = new(StringComparer.OrdinalIgnoreCase);
     private readonly TaskCompletionSource<CoreWebView2Controller> _controllerCreation =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly SemaphoreSlim _navigationGate = new(1, 1);
@@ -54,12 +58,14 @@ public sealed class WebView2TabHost : ITabHost
         CoreWebView2Environment environment,
         IntPtr parentWindow,
         CoreWebView2ControllerOptions controllerOptions,
-        string? downloadsFolder = null)
+        Func<string>? downloadsFolder = null)
     {
         _environment = environment ?? throw new ArgumentNullException(nameof(environment));
         _parentWindow = parentWindow;
         _controllerOptions = controllerOptions;
-        _downloadsFolder = downloadsFolder ?? string.Empty;
+        // The folder is resolved per download rather than captured, so a folder the user picked
+        // later in settings applies to every host, not only the ones created afterwards.
+        _downloadsFolder = downloadsFolder ?? (() => string.Empty);
     }
 
     public string Source => _controller?.CoreWebView2?.Source ?? string.Empty;
@@ -98,13 +104,15 @@ public sealed class WebView2TabHost : ITabHost
 
     public event EventHandler<DownloadStatusChangedEventArgs>? DownloadStatusChanged;
 
+    public event EventHandler<DownloadProgressChangedEventArgs>? DownloadProgressChanged;
+
     public event EventHandler<PermissionRequestedEventArgs>? PermissionRequested;
 
     internal static WebView2TabHost Create(
         CoreWebView2Environment environment,
         IntPtr parentWindow,
         CoreWebView2ControllerOptions controllerOptions,
-        string? downloadsFolder = null)
+        Func<string>? downloadsFolder = null)
     {
         var host = new WebView2TabHost(environment, parentWindow, controllerOptions, downloadsFolder);
         host.StartCreation();
@@ -315,6 +323,14 @@ public sealed class WebView2TabHost : ITabHost
         _isLoading = false;
         _pendingNavigation?.TrySetException(new ObjectDisposedException(nameof(WebView2TabHost)));
         _pendingNavigation = null;
+
+        foreach (var operation in _downloads.Values)
+        {
+            operation.StateChanged -= OnDownloadStateChanged;
+            operation.BytesReceivedChanged -= OnDownloadBytesReceived;
+        }
+
+        _downloads.Clear();
 
         if (_controller is { } controller)
         {
@@ -534,6 +550,15 @@ public sealed class WebView2TabHost : ITabHost
         core.NewWindowRequested -= OnNewWindowRequested;
         core.PermissionRequested -= OnPermissionRequested;
         core.DownloadStarting -= OnDownloadStarting;
+
+        // The operations outlive the controller's own events, so they are unsubscribed here too.
+        foreach (var operation in _downloads.Values)
+        {
+            operation.StateChanged -= OnDownloadStateChanged;
+            operation.BytesReceivedChanged -= OnDownloadBytesReceived;
+        }
+
+        _downloads.Clear();
     }
 
     private void OnSourceChanged(object? sender, CoreWebView2SourceChangedEventArgs args) =>
@@ -649,9 +674,13 @@ public sealed class WebView2TabHost : ITabHost
         var operation = args.DownloadOperation;
         _navigationStartedDownload = true;
         var suggested = BrowserDownloadPaths.SuggestedFileNameFrom(operation.ContentDisposition, operation.Uri);
-        var target = BrowserDownloadPaths.ResolveTargetPath(_downloadsFolder, suggested, File.Exists);
+        var target = BrowserDownloadPaths.ResolveTargetPath(_downloadsFolder(), suggested, File.Exists);
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         operation.StateChanged += OnDownloadStateChanged;
+        operation.BytesReceivedChanged += OnDownloadBytesReceived;
+        // The download is tracked by the file it writes to, so a command from the panel finds the
+        // operation that owns it whatever tab is active.
+        _downloads[target] = operation;
         args.ResultFilePath = target;
         // Handling the event keeps the runtime's own download dialog out of the shell.
         args.Handled = true;
@@ -668,16 +697,74 @@ public sealed class WebView2TabHost : ITabHost
             _ => BrowserDownloadState.Interrupted,
         };
         if (state == BrowserDownloadState.InProgress) return;
+
+        // A download the user paused is reported by the runtime as interrupted, with its own
+        // reason. It is not finished: it keeps its operation and its progress events, so it can be
+        // resumed and keeps reporting where it stopped.
+        if (state == BrowserDownloadState.Interrupted &&
+            operation.InterruptReason == CoreWebView2DownloadInterruptReason.UserPaused)
+        {
+            DownloadStatusChanged?.Invoke(this, new DownloadStatusChangedEventArgs(
+                BrowserDownloadState.Paused, operation.ResultFilePath, operation.Uri, TotalBytesOrNull(operation), null));
+            return;
+        }
+
         operation.StateChanged -= OnDownloadStateChanged;
+        operation.BytesReceivedChanged -= OnDownloadBytesReceived;
+        _downloads.Remove(operation.ResultFilePath);
         DownloadStatusChanged?.Invoke(this, new DownloadStatusChangedEventArgs(
             state,
             operation.ResultFilePath,
             operation.Uri,
-            // The runtime reports 0 when it does not know the size; that is an unknown size, not
-            // an empty file, so the shell does not show one that is not real.
-            operation.TotalBytesToReceive == 0 ? null : operation.TotalBytesToReceive,
+            TotalBytesOrNull(operation),
             state == BrowserDownloadState.Interrupted ? operation.InterruptReason.ToString() : null));
     }
+
+    private void OnDownloadBytesReceived(object? sender, object e)
+    {
+        // The runtime reports progress often; the shell throttles what it shows, so the adapter
+        // reports every value it gets and keeps no state of its own.
+        if (sender is not CoreWebView2DownloadOperation operation) return;
+        // The runtime reports progress often; the shell throttles what it shows, so the adapter
+        // reports every value it gets and keeps no state of its own.
+        var received = operation.BytesReceived;
+        DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedEventArgs(
+            operation.ResultFilePath,
+            received < 0 ? 0UL : (ulong)received,
+            operation.TotalBytesToReceive == 0 ? null : operation.TotalBytesToReceive));
+    }
+
+    public bool TryPauseDownload(string targetFilePath)
+    {
+        if (!_downloads.TryGetValue(targetFilePath, out var operation)) return false;
+        // The runtime reports the pause itself, as an interrupted download with its own reason.
+        operation.Pause();
+        return true;
+    }
+
+    public bool TryResumeDownload(string targetFilePath)
+    {
+        if (!_downloads.TryGetValue(targetFilePath, out var operation)) return false;
+        operation.Resume();
+        ReportLiveState(operation, BrowserDownloadState.InProgress);
+        return true;
+    }
+
+    public bool TryCancelDownload(string targetFilePath)
+    {
+        // A cancellation the runtime accepts ends the download: its state change arrives through
+        // the same path a failure uses, so the record ends up interrupted either way.
+        if (!_downloads.TryGetValue(targetFilePath, out var operation)) return false;
+        operation.Cancel();
+        return true;
+    }
+
+    private void ReportLiveState(CoreWebView2DownloadOperation operation, BrowserDownloadState state) =>
+        DownloadStatusChanged?.Invoke(this, new DownloadStatusChangedEventArgs(
+            state, operation.ResultFilePath, operation.Uri, TotalBytesOrNull(operation), null));
+
+    private static ulong? TotalBytesOrNull(CoreWebView2DownloadOperation operation) =>
+        operation.TotalBytesToReceive == 0 ? null : operation.TotalBytesToReceive;
 
     private static BrowserPermissionKind MapPermissionKind(CoreWebView2PermissionKind kind) => kind switch
     {

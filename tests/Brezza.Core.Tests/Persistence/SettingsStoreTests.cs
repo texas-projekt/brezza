@@ -89,6 +89,48 @@ public sealed class SettingsStoreTests
         Assert.Equal(BrowserStartupBehavior.NewTab, new SettingsStore(path).Load().StartupBehavior);
     }
 
+    [Fact]
+    public void Downloads_folder_is_persisted_as_a_full_path()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "settings.xml");
+        var store = new SettingsStore(path);
+
+        store.Save(new BrowserSettings { DownloadsFolder = BrowserSettings.NormalizeDownloadsFolder(@"sub\folder") });
+
+        Assert.Equal(Path.GetFullPath(@"sub\folder"), store.Load().DownloadsFolder);
+    }
+
+    [Fact]
+    public void An_unusable_downloads_folder_falls_back_to_empty()
+    {
+        // Empty means the user's own Downloads folder, which is what the browser uses until another
+        // one is picked; a path the runtime cannot parse is not a folder to write downloads to.
+        Assert.Equal(string.Empty, BrowserSettings.NormalizeDownloadsFolder(null));
+        Assert.Equal(string.Empty, BrowserSettings.NormalizeDownloadsFolder("   "));
+        Assert.Equal(string.Empty, BrowserSettings.NormalizeDownloadsFolder("\0bad"));
+
+        using var directory = new TestDirectory();
+        var store = new SettingsStore(Path.Combine(directory.Path, "settings.xml"));
+        store.Save(new BrowserSettings { DownloadsFolder = "\0bad" });
+        Assert.Equal(string.Empty, store.Load().DownloadsFolder);
+    }
+
+    [Fact]
+    public void A_schema_3_file_without_a_downloads_folder_keeps_the_rest_of_its_settings()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "settings.xml");
+        File.WriteAllText(path,
+            "<settings schemaVersion=\"3\"><searchTemplate>https://search.example/find?q={query}</searchTemplate><theme>Dark</theme></settings>");
+
+        var loaded = new SettingsStore(path).Load();
+
+        Assert.Equal(BrowserThemeMode.Dark, loaded.Theme);
+        Assert.Equal("https://search.example/find?q={query}", loaded.SearchTemplate);
+        Assert.Equal(string.Empty, loaded.DownloadsFolder);
+    }
+
     private sealed class TestDirectory : IDisposable
     {
         public TestDirectory()

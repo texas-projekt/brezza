@@ -9,6 +9,19 @@
 
 ## Unreleased
 
+- Added a configurable downloads folder and download progress controls. The settings panel grew a
+  "Downloads to" row with a Browse button that opens the system folder picker, and the factory
+  resolves the folder per download, so a new one applies to the next download without a restart; the
+  saved folder is normalized to a full path, and empty keeps the user's own Downloads folder
+  (settings schema 4, which loads a schema 3 profile unchanged). A running download's row now shows
+  what has arrived against the total, the share when the runtime knows one, and a thin bar along its
+  bottom, and its own buttons pause and resume it and cancel it behind a confirmation; a finished
+  row keeps the folder and remove buttons it already had. The runtime reports a paused download as
+  interrupted with the reason `UserPaused`, so the adapter maps that one reason to `Paused` and the
+  download keeps its operation and its progress events; `Cancel` ends it through the runtime's own
+  interruption. Progress is reported often and shown rarely: the registry keeps every value, the
+  panel is refreshed on a fixed cadence, and the store is never saved for progress. A failed row now
+  names the reason in the user's language instead of the runtime's enum.
 - Added a downloads panel, in the same shape as history and bookmarks. Core owns the live list (`DownloadRegistry`: a download is recorded when the adapter reports its target file, and the completion or interruption the runtime reports is applied to it, newest first), and `DownloadStore` persists the finished records of normal sessions in a schema-versioned `downloads.xml`, so the list survives a restart whatever the startup behavior is. The panel opens from the toolbar menu and Ctrl+J, lists every download with where it came from, how it ended (Completed or Failed, with its size when the runtime knows it), and when; a completed file is opened from its row and its folder from the row's own button, both through the shell, and a failed launch is reported as a notice. Removing one entry goes without asking, like a bookmark; clearing the list asks first and removes records only — the downloaded files stay where they were written. A private download is listed while its private session is open and is never written to the device, so the last private tab closing also ends its entries; a download that is still running when the browser closes is not a record yet and is not persisted. The Windows smoke drives a real attachment from the local origin through the whole path: the file is written to the downloads folder, the panel lists it, filters, removes a row, clears the rest behind the confirmation, and the next process restores the list from the store.
 - Stopped reporting a download as a failed page. Navigating to an attachment starts a download and the runtime aborts the navigation with `ConnectionAborted` once the download takes over, which the shell reported as "Page could not be loaded" and marked the tab failed — after a successful download. The host now reports such a completion as `TabNavigationResultEventArgs.IsReplacedByDownload`, the same "not a page failure" channel a superseded navigation uses, so the aborted navigation raises no notice and leaves the tab live; the download's own notice is what the user sees. A Core test covers the classification, and the Windows smoke asserts the completion notice survives the aborted navigation.
 - Added a DownloadsPanel scenario to the native UI visual baseline: the panel's rows come from a seeded `downloads.xml`, so the screenshot is reproducible on any machine, unlike the cookies panel whose rows are the machine's own. The toolbar-menu scenario's menu now carries the downloads entry.

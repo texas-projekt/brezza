@@ -112,6 +112,53 @@ public sealed class DownloadStoreTests
     }
 
     [Fact]
+    public void A_paused_download_is_never_written()
+    {
+        // A paused download is still running, so it is not a finished record; the browser closes
+        // without a trace of it on the device.
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "downloads.xml");
+        var store = new DownloadStore(path);
+        var started = new DateTime(2026, 10, 17, 12, 0, 0, DateTimeKind.Utc);
+
+        store.Save(new[]
+        {
+            new BrowserDownload("download-paused", "https://example.com/paused.iso", "paused.iso",
+                @"C:\Downloads\paused.iso", BrowserDownloadState.Paused, started, BrowserSessionKind.Normal,
+                null, 2048, null, 4096),
+            new BrowserDownload("download-done", "https://example.com/done.iso", "done.iso",
+                @"C:\Downloads\done.iso", BrowserDownloadState.Completed, started.AddMinutes(1),
+                BrowserSessionKind.Normal, started.AddMinutes(2), 99),
+        });
+
+        var restored = new DownloadStore(path).GetAll();
+
+        var entry = Assert.Single(restored);
+        Assert.Equal("download-done", entry.Id);
+    }
+
+    [Fact]
+    public void A_persisted_record_keeps_the_bytes_it_had_when_it_was_written()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "downloads.xml");
+        var store = new DownloadStore(path);
+        var started = new DateTime(2026, 10, 17, 12, 0, 0, DateTimeKind.Utc);
+
+        store.Save(new[]
+        {
+            new BrowserDownload("download-partial", "https://example.com/partial.iso", "partial.iso",
+                @"C:\Downloads\partial.iso", BrowserDownloadState.Interrupted, started, BrowserSessionKind.Normal,
+                started.AddMinutes(1), 2048, "NetworkError", 1024),
+        });
+
+        var restored = new DownloadStore(path).GetAll();
+
+        var entry = Assert.Single(restored);
+        Assert.Equal(1024UL, entry.ReceivedBytes);
+    }
+
+    [Fact]
     public void The_newest_download_is_listed_first()
     {
         using var directory = new TestDirectory();

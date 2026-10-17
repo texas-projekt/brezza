@@ -33,7 +33,7 @@ public sealed class WebView2TabHostFactory : ITabHostFactory, IBrowserDataManage
 
     private readonly string _userDataRoot;
     private readonly IntPtr _parentWindow;
-    private readonly string? _downloadsFolder;
+    private string? _downloadsFolder;
     private readonly Color _defaultBackgroundColor;
     private Task<CoreWebView2Environment>? _normalEnvironmentTask;
     private Task<CoreWebView2Environment>? _privateEnvironmentTask;
@@ -67,17 +67,24 @@ public sealed class WebView2TabHostFactory : ITabHostFactory, IBrowserDataManage
 
     public string? PrivateUserDataFolder => _privateUserDataFolder;
 
-    /// <summary>Folder downloads are written to; defaults to the user's Downloads folder.</summary>
-    public string DownloadsFolder =>
-        string.IsNullOrWhiteSpace(_downloadsFolder)
+    /// <summary>
+    /// Folder downloads are written to. Setting it changes where the next download lands; the
+    /// environments and hosts already created keep working, so no restart is needed. Empty falls
+    /// back to the user's own Downloads folder.
+    /// </summary>
+    public string DownloadsFolder
+    {
+        get => string.IsNullOrWhiteSpace(_downloadsFolder)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
             : _downloadsFolder!;
+        set => _downloadsFolder = string.IsNullOrWhiteSpace(value) ? null : value;
+    }
 
     public async Task<ITabHost> CreateAsync(string tabId, BrowserSessionKind sessionKind)
     {
         var environment = await GetEnvironmentAsync(sessionKind).ConfigureAwait(true);
         var options = CreateControllerOptions(environment, sessionKind);
-        return WebView2TabHost.Create(environment, _parentWindow, options, DownloadsFolder);
+        return WebView2TabHost.Create(environment, _parentWindow, options, () => DownloadsFolder);
     }
 
     public async Task<SessionCleanupResult> CleanupSessionAsync(BrowserSessionKind sessionKind)

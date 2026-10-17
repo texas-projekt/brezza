@@ -85,6 +85,7 @@ public sealed class DownloadStore
         StartedUtcTicks = download.StartedUtc.ToUniversalTime().Ticks,
         CompletedUtcTicks = download.CompletedUtc?.ToUniversalTime().Ticks,
         TotalBytes = download.TotalBytes?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
+        ReceivedBytes = download.ReceivedBytes?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
         InterruptReason = download.InterruptReason ?? string.Empty,
     };
 
@@ -99,7 +100,8 @@ public sealed class DownloadStore
         BrowserSessionKind.Normal,
         record.CompletedUtcTicks is { } completed ? new DateTime(completed, DateTimeKind.Utc) : (DateTime?)null,
         ulong.TryParse(record.TotalBytes, NumberStyles.None, CultureInfo.InvariantCulture, out var total) ? total : (ulong?)null,
-        record.InterruptReason.Length == 0 ? null : record.InterruptReason);
+        record.InterruptReason.Length == 0 ? null : record.InterruptReason,
+        ulong.TryParse(record.ReceivedBytes, NumberStyles.None, CultureInfo.InvariantCulture, out var received) ? received : (ulong?)null);
 
     [XmlRoot("downloads")]
     public sealed class DownloadDocument
@@ -138,6 +140,9 @@ public sealed class DownloadStore
 
         [XmlElement("totalBytes")]
         public string TotalBytes { get; set; } = string.Empty;
+
+        [XmlElement("receivedBytes")]
+        public string ReceivedBytes { get; set; } = string.Empty;
 
         [XmlElement("interruptReason")]
         public string InterruptReason { get; set; } = string.Empty;

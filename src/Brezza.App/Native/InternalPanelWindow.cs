@@ -60,17 +60,28 @@ internal enum PanelRowButton
 
     /// <summary>Removes the row's own entry.</summary>
     Remove,
+
+    /// <summary>Pauses a running download.</summary>
+    Pause,
+
+    /// <summary>Resumes a paused download.</summary>
+    Resume,
+
+    /// <summary>Cancels a download and drops its partial file.</summary>
+    Cancel,
 }
 
 /// <summary>Settings the user submitted from the native settings panel.</summary>
 internal readonly struct SettingsSubmission
 {
-    public SettingsSubmission(string searchTemplate, string language, BrowserThemeMode theme, BrowserStartupBehavior startupBehavior)
+    public SettingsSubmission(string searchTemplate, string language, BrowserThemeMode theme,
+        BrowserStartupBehavior startupBehavior, string downloadsFolder)
     {
         SearchTemplate = searchTemplate;
         Language = language;
         Theme = theme;
         StartupBehavior = startupBehavior;
+        DownloadsFolder = downloadsFolder;
     }
 
     public string SearchTemplate { get; }
@@ -80,6 +91,9 @@ internal readonly struct SettingsSubmission
     public BrowserThemeMode Theme { get; }
 
     public BrowserStartupBehavior StartupBehavior { get; }
+
+    /// <summary>The folder downloads are written to; empty means the user's own Downloads folder.</summary>
+    public string DownloadsFolder { get; }
 }
 
 /// <summary>
@@ -119,6 +133,9 @@ internal sealed class InternalPanelWindow : IDisposable
     public const int IdSubtitle = 2022;
     public const int IdStartupLabel = 2023;
     public const int IdStartup = 2024;
+    public const int IdDownloadFolderLabel = 2025;
+    public const int IdDownloadFolder = 2026;
+    public const int IdDownloadFolderBrowse = 2027;
 
     // Unscaled metrics at 96 DPI.
     private const int ListRowHeight = 48;
@@ -126,6 +143,9 @@ internal sealed class InternalPanelWindow : IDisposable
     private const int RemoveButtonSize = 28;
     private const string GlyphRemove = "\uE711";
     private const string GlyphFolder = "\uE8B7";
+    private const string GlyphPause = "\uE769";
+    private const string GlyphResume = "\uE768";
+    private const string GlyphCancel = "\uE894";
 
     private readonly NativeMethods.WndProc _wndProc;
     private readonly Localization _localization;
@@ -152,6 +172,9 @@ internal sealed class InternalPanelWindow : IDisposable
     private IntPtr _themeCombo;
     private IntPtr _startupLabel;
     private IntPtr _startupCombo;
+    private IntPtr _downloadFolderLabel;
+    private IntPtr _downloadFolderEdit;
+    private IntPtr _downloadFolderButton;
     private IntPtr _statusText;
     private IntPtr _filterEdit;
     private IntPtr _listView;
@@ -171,6 +194,9 @@ internal sealed class InternalPanelWindow : IDisposable
     private string _savedLanguage = string.Empty;
     private BrowserThemeMode _savedTheme = BrowserThemeMode.System;
     private BrowserStartupBehavior _savedStartup = BrowserStartupBehavior.NewTab;
+
+    /// <summary>The downloads folder as it was last saved; empty means the user's own Downloads folder.</summary>
+    private string _savedDownloadFolder = string.Empty;
     private string? _statusKey;
 
     public InternalPanelWindow(Localization localization, IntPtr owner, NativeThemeSource themeSource)
@@ -188,6 +214,9 @@ internal sealed class InternalPanelWindow : IDisposable
     }
 
     public event EventHandler<SettingsSubmission>? SaveSettingsRequested;
+
+    /// <summary>The user asked the system to pick a downloads folder; the shell shows the picker.</summary>
+    public event EventHandler? BrowseDownloadFolderRequested;
     public event EventHandler<string>? OpenUrlRequested;
     public event EventHandler<string>? RemoveEntryRequested;
     public event EventHandler<BrowserCookie>? RemoveCookieRequested;
@@ -196,10 +225,16 @@ internal sealed class InternalPanelWindow : IDisposable
     public event EventHandler<string>? OpenDownloadFileRequested;
     public event EventHandler<string>? OpenDownloadFolderRequested;
     public event EventHandler<string>? RemoveDownloadRequested;
+    public event EventHandler<string>? PauseDownloadRequested;
+    public event EventHandler<string>? ResumeDownloadRequested;
+    public event EventHandler<string>? CancelDownloadRequested;
     public event EventHandler? ClearDownloadsRequested;
     public event EventHandler? CloseRequested;
 
     public bool IsOpen => _hwnd != IntPtr.Zero;
+
+    /// <summary>The panel's own window, which owns the dialogs it opens.</summary>
+    public IntPtr Handle => _hwnd;
 
     private bool IsSettings => _mode == InternalPanelMode.Settings;
 
@@ -223,6 +258,7 @@ internal sealed class InternalPanelWindow : IDisposable
     {
         _presetLabel, _presetCombo, _templateLabel, _templateEdit, _languageLabel, _languageCombo,
         _themeLabel, _themeCombo, _startupLabel, _startupCombo,
+        _downloadFolderLabel, _downloadFolderEdit, _downloadFolderButton,
     };
 
     /// <summary>Controls both form modes share: the status line and the footer buttons.</summary>
@@ -232,18 +268,21 @@ internal sealed class InternalPanelWindow : IDisposable
 
     // ---------- Presentation ----------
 
-    public void ShowSettings(string template, string language, BrowserThemeMode theme, BrowserStartupBehavior startupBehavior)
+    public void ShowSettings(string template, string language, BrowserThemeMode theme,
+        BrowserStartupBehavior startupBehavior, string downloadsFolder)
     {
         _mode = InternalPanelMode.Settings;
         _savedTemplate = template;
         _savedLanguage = language;
         _savedTheme = BrowserSettings.NormalizeTheme(theme);
         _savedStartup = BrowserSettings.NormalizeStartupBehavior(startupBehavior);
+        _savedDownloadFolder = downloadsFolder ?? string.Empty;
         _statusKey = null;
         EnsureCreated();
         ApplyLanguage();
 
         NativeMethods.SetWindowText(_templateEdit, template);
+        NativeMethods.SetWindowText(_downloadFolderEdit, _savedDownloadFolder);
         SelectLanguage(language);
         SelectPreset(template);
         SelectTheme(_savedTheme);
@@ -279,6 +318,17 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.SetFocus(_filterEdit);
     }
 
+    /// <summary>
+    /// Fills the downloads-folder field with a folder the user picked. Only a pick is written, so
+    /// dismissing the dialog leaves whatever the field already holds.
+    /// </summary>
+    public void SetDownloadFolder(string folder)
+    {
+        if (_hwnd == IntPtr.Zero) return;
+        NativeMethods.SetWindowText(_downloadFolderEdit, folder ?? string.Empty);
+        UpdateDirty();
+    }
+
     /// <summary>Reports the outcome of a settings save attempt.</summary>
     public void SetSettingsResult(bool saved)
     {
@@ -290,6 +340,7 @@ internal sealed class InternalPanelWindow : IDisposable
             _savedLanguage = LanguageValue();
             _savedTheme = ThemeValue();
             _savedStartup = StartupValue();
+            _savedDownloadFolder = DownloadFolderValue();
         }
 
         SetStatus(saved ? "settings.saved" : "settings.invalid");
@@ -315,6 +366,8 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.SetWindowText(_languageLabel, _localization.Get("settings.language"));
         NativeMethods.SetWindowText(_themeLabel, _localization.Get("settings.theme"));
         NativeMethods.SetWindowText(_startupLabel, _localization.Get("settings.startup"));
+        NativeMethods.SetWindowText(_downloadFolderLabel, _localization.Get("settings.downloadFolder"));
+        NativeMethods.SetWindowText(_downloadFolderButton, _localization.Get("settings.downloadFolderBrowse"));
         NativeMethods.SendMessage(_filterEdit, 0x1501 /* EM_SETCUEBANNER */, new IntPtr(1),
             _localization.Get(_mode switch
             {
@@ -506,6 +559,9 @@ internal sealed class InternalPanelWindow : IDisposable
             case IdCancel:
                 CancelAndClose();
                 break;
+            case IdDownloadFolderBrowse:
+                BrowseDownloadFolderRequested?.Invoke(this, EventArgs.Empty);
+                break;
         }
     }
 
@@ -639,6 +695,9 @@ internal sealed class InternalPanelWindow : IDisposable
         _themeCombo = CreateChild(hWnd, "COMBOBOX", IdTheme, combo);
         _startupLabel = CreateChild(hWnd, "STATIC", IdStartupLabel, label);
         _startupCombo = CreateChild(hWnd, "COMBOBOX", IdStartup, combo);
+        _downloadFolderLabel = CreateChild(hWnd, "STATIC", IdDownloadFolderLabel, label);
+        _downloadFolderEdit = CreateChild(hWnd, "EDIT", IdDownloadFolder, edit);
+        _downloadFolderButton = CreateButton(hWnd, IdDownloadFolderBrowse, FlatButtonStyle.Subtle);
         _statusText = CreateChild(hWnd, "STATIC", IdStatus, label | NativeMethods.SS_ENDELLIPSIS);
         _filterEdit = CreateChild(hWnd, "EDIT", IdFilter, edit);
         _listView = CreateChild(hWnd, "LISTBOX", IdList,
@@ -652,7 +711,7 @@ internal sealed class InternalPanelWindow : IDisposable
 
         foreach (var field in new[] { _presetCombo, _languageCombo, _themeCombo, _startupCombo })
             _fields.RegisterCombo(field, FlatBackdrop.Surface);
-        foreach (var field in new[] { _templateEdit, _filterEdit })
+        foreach (var field in new[] { _templateEdit, _filterEdit, _downloadFolderEdit })
             _fields.RegisterEdit(field, FlatBackdrop.Surface);
     }
 
@@ -836,13 +895,18 @@ internal sealed class InternalPanelWindow : IDisposable
     private void SaveSettings()
     {
         var template = NativeMethods.GetWindowText(_templateEdit).Trim();
-        SaveSettingsRequested?.Invoke(this, new SettingsSubmission(template, LanguageValue(), ThemeValue(), StartupValue()));
+        SaveSettingsRequested?.Invoke(this, new SettingsSubmission(
+            template, LanguageValue(), ThemeValue(), StartupValue(), DownloadFolderValue()));
     }
+
+    /// <summary>The folder typed or picked in the form, trimmed; empty means the default folder.</summary>
+    private string DownloadFolderValue() => NativeMethods.GetWindowText(_downloadFolderEdit).Trim();
 
     /// <summary>Cancel works like a dialog's Cancel: unsaved changes are dropped and the panel closes.</summary>
     private void CancelAndClose()
     {
         NativeMethods.SetWindowText(_templateEdit, _savedTemplate);
+        NativeMethods.SetWindowText(_downloadFolderEdit, _savedDownloadFolder);
         SelectLanguage(_savedLanguage);
         SelectTheme(_savedTheme);
         SelectStartup(_savedStartup);
@@ -857,6 +921,7 @@ internal sealed class InternalPanelWindow : IDisposable
         if (_saveButton == IntPtr.Zero) return;
         var dirty =
             !string.Equals(NativeMethods.GetWindowText(_templateEdit).Trim(), _savedTemplate, StringComparison.Ordinal) ||
+            !string.Equals(DownloadFolderValue(), _savedDownloadFolder, StringComparison.Ordinal) ||
             !string.Equals(LanguageValue(), _savedLanguage, StringComparison.Ordinal) ||
             ThemeValue() != _savedTheme ||
             StartupValue() != _savedStartup;
@@ -980,32 +1045,13 @@ internal sealed class InternalPanelWindow : IDisposable
         var text = rect;
         text.left += Scale(14);
         // Space for the row buttons is always reserved, so text does not shift on hover.
-        text.right = RowButtonsRight(rect) - Scale(8);
+        text.right = RowButtonsRight(rect, RowButtonCountAt(row) - 1) - Scale(8);
         if (row == _hotRow || (item.itemState & NativeMethods.ODS_SELECTED) != 0)
         {
-            // A downloads row opens the folder its file was written to beside removing the entry;
-            // every other row only removes itself.
-            if (IsDownloads)
-            {
-                var folder = FolderButtonRect(rect);
-                if (row == _hotRow && _hotButton == PanelRowButton.Folder)
-                {
-                    NativePaint.FillRounded(item.hDC, folder, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
-                }
-
-                NativePaint.Text(item.hDC, GlyphFolder, folder, _fonts.SmallIcon, palette.SecondaryText,
-                    NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
-            }
-
-            var button = RemoveButtonRect(rect);
-            if (row == _hotRow && _hotButton == PanelRowButton.Remove)
-            {
-                NativePaint.FillRounded(item.hDC, button, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
-            }
-
-            NativePaint.Text(item.hDC, GlyphRemove, button, _fonts.SmallIcon, palette.SecondaryText,
-                NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+            DrawRowButtons(item.hDC, rect, entry, row, palette);
         }
+
+        DrawDownloadProgress(item.hDC, rect, entry);
 
         const uint line = NativeMethods.DT_LEFT | NativeMethods.DT_SINGLELINE | NativeMethods.DT_END_ELLIPSIS;
         if (string.IsNullOrWhiteSpace(entry.Title))
@@ -1022,6 +1068,78 @@ internal sealed class InternalPanelWindow : IDisposable
         NativePaint.Text(item.hDC, entry.Title, title, _fonts.Body, palette.Text, line | NativeMethods.DT_BOTTOM);
         NativePaint.Text(item.hDC, entry.Url, url, _fonts.Body, palette.SecondaryText, line);
         return true;
+    }
+
+    /// <summary>Draws the buttons a row shows: remove always, and what its entry acts on.</summary>
+    private void DrawRowButtons(IntPtr hDC, NativeMethods.RECT row, PanelEntry entry, int index, NativeThemePalette palette)
+    {
+        var download = entry.Download;
+        var hot = index == _hotRow;
+
+        // A running download pauses or resumes and cancels; a finished one opens its folder.
+        if (IsDownloads && download is { IsRunning: true })
+        {
+            var live = LiveButtonRect(row);
+            if (hot && _hotButton == (download.State == BrowserDownloadState.Paused ? PanelRowButton.Resume : PanelRowButton.Pause))
+            {
+                NativePaint.FillRounded(hDC, live, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
+            }
+
+            NativePaint.Text(hDC, download.State == BrowserDownloadState.Paused ? GlyphResume : GlyphPause, live,
+                _fonts.SmallIcon, palette.SecondaryText, NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+
+            var cancel = CancelButtonRect(row);
+            if (hot && _hotButton == PanelRowButton.Cancel)
+            {
+                NativePaint.FillRounded(hDC, cancel, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
+            }
+
+            NativePaint.Text(hDC, GlyphCancel, cancel, _fonts.SmallIcon, palette.SecondaryText,
+                NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+        }
+        else if (IsDownloads)
+        {
+            var folder = FolderButtonRect(row);
+            if (hot && _hotButton == PanelRowButton.Folder)
+            {
+                NativePaint.FillRounded(hDC, folder, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
+            }
+
+            NativePaint.Text(hDC, GlyphFolder, folder, _fonts.SmallIcon, palette.SecondaryText,
+                NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+        }
+
+        var button = RemoveButtonRect(row);
+        if (hot && _hotButton == PanelRowButton.Remove)
+        {
+            NativePaint.FillRounded(hDC, button, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
+        }
+
+        NativePaint.Text(hDC, GlyphRemove, button, _fonts.SmallIcon, palette.SecondaryText,
+            NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+    }
+
+    /// <summary>
+    /// Draws a thin bar along the bottom of a running download's row, filled by the share that has
+    /// arrived. It is drawn only when the runtime reported a total, because a share of an unknown
+    /// size is not a share.
+    /// </summary>
+    private void DrawDownloadProgress(IntPtr hDC, NativeMethods.RECT row, PanelEntry entry)
+    {
+        var download = entry.Download;
+        if (!IsDownloads || download is not { IsRunning: true } || download.TotalBytes is not { } total || total == 0) return;
+
+        var received = download.ReceivedBytes ?? 0;
+        var share = received >= total ? 1 : (double)received / total;
+        var height = Math.Max(Scale(2), Scale(3));
+        var track = NativePaint.Rect(row.left + Scale(4), row.bottom - height - Scale(2), row.Width - Scale(8), height);
+        NativePaint.FillRounded(hDC, track, height / 2, _theme.Palette.Border, _theme);
+        var filled = track;
+        filled.right = filled.left + (int)(track.Width * share);
+        if (filled.right > filled.left)
+        {
+            NativePaint.FillRounded(hDC, filled, height / 2, _theme.Palette.Accent, _theme);
+        }
     }
 
     private void UpdateListActions()
@@ -1064,6 +1182,31 @@ internal sealed class InternalPanelWindow : IDisposable
         }
     }
 
+    /// <summary>Pauses or resumes a running download.</summary>
+    private void PauseOrResume(int index, bool paused)
+    {
+        if (index < 0 || index >= _visible.Count) return;
+        var download = _visible[index].Download;
+        if (download is not { IsRunning: true }) return;
+        if (paused && download.State == BrowserDownloadState.Paused) return;
+        if (!paused && download.State == BrowserDownloadState.InProgress) return;
+        var requested = paused ? PauseDownloadRequested : ResumeDownloadRequested;
+        requested?.Invoke(this, download.TargetFilePath);
+    }
+
+    /// <summary>
+    /// Cancels a download. The partial file is dropped by the runtime, so this is the one download
+    /// action that asks first: it destroys bytes the user already waited for.
+    /// </summary>
+    private void Cancel(int index)
+    {
+        if (index < 0 || index >= _visible.Count) return;
+        var download = _visible[index].Download;
+        if (download is not { IsRunning: true }) return;
+        if (!Confirm("downloads.cancelConfirm", "downloads.cancel")) return;
+        CancelDownloadRequested?.Invoke(this, download.TargetFilePath);
+    }
+
     private void Remove(int index)
     {
         if (index < 0 || index >= _visible.Count) return;
@@ -1093,24 +1236,36 @@ internal sealed class InternalPanelWindow : IDisposable
         RemoveEntryRequested?.Invoke(this, entry.Url);
     }
 
-    /// <summary>The remove button inside the right edge of a list row, in list-box coordinates.</summary>
-    private NativeMethods.RECT RemoveButtonRect(NativeMethods.RECT row)
+    /// <summary>The rect of a list row's nth button, counted from the right edge.</summary>
+    private NativeMethods.RECT RowButtonRect(NativeMethods.RECT row, int index)
     {
         var size = Scale(RemoveButtonSize);
-        return NativePaint.Rect(row.right - size - Scale(10), row.top + (row.Height - size) / 2, size, size);
+        var left = row.right - size - Scale(10) - index * (size + Scale(4));
+        return NativePaint.Rect(left, row.top + (row.Height - size) / 2, size, size);
     }
 
-    /// <summary>The open-folder button a downloads row shows left of its remove button.</summary>
-    private NativeMethods.RECT FolderButtonRect(NativeMethods.RECT row)
-    {
-        var remove = RemoveButtonRect(row);
-        var size = Scale(RemoveButtonSize);
-        return NativePaint.Rect(remove.left - size - Scale(4), remove.top, size, size);
-    }
+    /// <summary>The remove button every list row shows, rightmost.</summary>
+    private NativeMethods.RECT RemoveButtonRect(NativeMethods.RECT row) => RowButtonRect(row, 0);
+
+    /// <summary>The cancel button a running download shows beside removing the entry.</summary>
+    private NativeMethods.RECT CancelButtonRect(NativeMethods.RECT row) => RowButtonRect(row, 1);
+
+    /// <summary>The pause or resume button a running download shows, leftmost of its buttons.</summary>
+    private NativeMethods.RECT LiveButtonRect(NativeMethods.RECT row) => RowButtonRect(row, 2);
+
+    /// <summary>The open-folder button a finished download shows left of its remove button.</summary>
+    private NativeMethods.RECT FolderButtonRect(NativeMethods.RECT row) => RowButtonRect(row, 1);
 
     /// <summary>The left edge of the rightmost button a row shows, so text never runs under one.</summary>
-    private int RowButtonsRight(NativeMethods.RECT row) =>
-        IsDownloads ? FolderButtonRect(row).left : RemoveButtonRect(row).left;
+    private int RowButtonsRight(NativeMethods.RECT row, int index) => RowButtonRect(row, index).left;
+
+    /// <summary>How many buttons a row shows, counted from the right edge.</summary>
+    private int RowButtonCount(BrowserDownload? download) =>
+        IsDownloads && download is { IsRunning: true } ? 3 : IsDownloads ? 2 : 1;
+
+    /// <summary>How many buttons the row at <paramref name="index"/> shows.</summary>
+    private int RowButtonCountAt(int index) =>
+        index >= 0 && index < _visible.Count ? RowButtonCount(_visible[index].Download) : 1;
 
     private static bool IsInRect(int x, int y, NativeMethods.RECT rect) =>
         x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
@@ -1131,8 +1286,21 @@ internal sealed class InternalPanelWindow : IDisposable
         var x = unchecked((short)NativeMethods.GetLoWord(lParam));
         var y = unchecked((short)NativeMethods.GetHiWord(lParam));
         var row = RowRect(index);
+        var download = _visible[index].Download;
         if (IsInRect(x, y, RemoveButtonRect(row))) return (index, PanelRowButton.Remove);
-        if (IsDownloads && IsInRect(x, y, FolderButtonRect(row))) return (index, PanelRowButton.Folder);
+        if (IsDownloads && download is { IsRunning: true })
+        {
+            if (IsInRect(x, y, CancelButtonRect(row))) return (index, PanelRowButton.Cancel);
+            if (IsInRect(x, y, LiveButtonRect(row)))
+            {
+                return (index, download.State == BrowserDownloadState.Paused ? PanelRowButton.Resume : PanelRowButton.Pause);
+            }
+        }
+        else if (IsDownloads && IsInRect(x, y, FolderButtonRect(row)))
+        {
+            return (index, PanelRowButton.Folder);
+        }
+
         return (index, PanelRowButton.None);
     }
 
@@ -1192,6 +1360,15 @@ internal sealed class InternalPanelWindow : IDisposable
                     {
                         case PanelRowButton.Folder:
                             OpenFolder(release.Row);
+                            break;
+                        case PanelRowButton.Pause:
+                            PauseOrResume(release.Row, paused: true);
+                            break;
+                        case PanelRowButton.Resume:
+                            PauseOrResume(release.Row, paused: false);
+                            break;
+                        case PanelRowButton.Cancel:
+                            Cancel(release.Row);
                             break;
                         case PanelRowButton.Remove:
                             Remove(release.Row);
@@ -1347,7 +1524,10 @@ internal sealed class InternalPanelWindow : IDisposable
             (_languageLabel, _languageCombo), (_themeLabel, _themeCombo),
             (_startupLabel, _startupCombo),
         };
-        var labelWidth = MeasureLabelColumn(rows, width);
+
+        // The downloads folder's label is measured with the rest, so its own row is not narrower
+        // than the column the other rows use.
+        var labelWidth = MeasureLabelColumn(rows.Concat(new[] { (_downloadFolderLabel, _downloadFolderButton) }).ToArray(), width);
         var fieldLeft = left + labelWidth;
         var fieldWidth = width - labelWidth;
         var y = top;
@@ -1357,6 +1537,16 @@ internal sealed class InternalPanelWindow : IDisposable
             NativeMethods.MoveWindow(label, left, y + (fieldHeight - bodyHeight) / 2, labelWidth, bodyHeight, true);
             y += fieldHeight + Scale(NativeMetrics.SpaceLarge);
         }
+
+        // The downloads folder is the one row with a field and a button beside it: the button keeps
+        // its own width and the path takes what is left, so a long path stays readable.
+        var browseWidth = TextButtonWidth(_downloadFolderButton);
+        var folderHeight = PlaceField(_downloadFolderEdit, fieldLeft, y,
+            Math.Max(Scale(120), fieldWidth - browseWidth - Scale(NativeMetrics.SpaceSmall)));
+        NativeMethods.MoveWindow(_downloadFolderButton,
+            fieldLeft + fieldWidth - browseWidth, y, browseWidth, folderHeight, true);
+        NativeMethods.MoveWindow(_downloadFolderLabel, left, y + (folderHeight - bodyHeight) / 2, labelWidth, bodyHeight, true);
+        y += folderHeight + Scale(NativeMetrics.SpaceLarge);
 
         NativeMethods.MoveWindow(_statusText, fieldLeft, y, fieldWidth, bodyHeight, true);
     }
@@ -1396,7 +1586,7 @@ internal sealed class InternalPanelWindow : IDisposable
         var height = Scale(NativeMetrics.ControlHeight);
         // An edit takes the row height directly; a drop-down list's window height is its open list,
         // and the field renderer sizes the closed field to the row.
-        var isEdit = field == _templateEdit || field == _filterEdit;
+        var isEdit = field == _templateEdit || field == _filterEdit || field == _downloadFolderEdit;
         NativeMethods.MoveWindow(field, left, top, width, isEdit ? height : Scale(240), true);
         return height;
     }

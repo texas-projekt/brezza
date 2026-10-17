@@ -69,6 +69,12 @@ public sealed class TabSleepPolicyTests
 
         public Task<Stream?> GetFaviconAsync() => Task.FromResult<Stream?>(null);
 
+        public bool TryPauseDownload(string targetFilePath) => false;
+
+        public bool TryResumeDownload(string targetFilePath) => false;
+
+        public bool TryCancelDownload(string targetFilePath) => false;
+
         public bool CanGoBack => false;
 
         public bool CanGoForward => false;
@@ -106,6 +112,8 @@ public sealed class TabSleepPolicyTests
         public event EventHandler<DownloadStartedEventArgs>? DownloadStarted;
 
         public event EventHandler<DownloadStatusChangedEventArgs>? DownloadStatusChanged;
+
+        public event EventHandler<DownloadProgressChangedEventArgs>? DownloadProgressChanged;
 
         public event EventHandler<PermissionRequestedEventArgs>? PermissionRequested;
 #pragma warning restore CS0067

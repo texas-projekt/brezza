@@ -21,7 +21,8 @@ public sealed class BrowserDownload
         BrowserSessionKind sessionKind,
         DateTime? completedUtc = null,
         ulong? totalBytes = null,
-        string? interruptReason = null)
+        string? interruptReason = null,
+        ulong? receivedBytes = null)
     {
         Id = id ?? string.Empty;
         SourceUrl = sourceUrl ?? string.Empty;
@@ -32,6 +33,7 @@ public sealed class BrowserDownload
         CompletedUtc = completedUtc;
         TotalBytes = totalBytes;
         InterruptReason = interruptReason;
+        ReceivedBytes = receivedBytes;
         SessionKind = sessionKind;
     }
 
@@ -59,10 +61,16 @@ public sealed class BrowserDownload
     /// <summary>Runtime interrupt reason text when the state is <see cref="BrowserDownloadState.Interrupted"/>.</summary>
     public string? InterruptReason { get; }
 
+    /// <summary>Bytes written so far while the download is running, when the runtime reported any.</summary>
+    public ulong? ReceivedBytes { get; }
+
     public BrowserSessionKind SessionKind { get; }
 
     /// <summary>A download that reached a terminal state and can be persisted.</summary>
-    public bool IsTerminal => State != BrowserDownloadState.InProgress;
+    public bool IsTerminal => State is BrowserDownloadState.Completed or BrowserDownloadState.Interrupted;
+
+    /// <summary>A download that is still running or paused, so its progress is worth showing.</summary>
+    public bool IsRunning => State is BrowserDownloadState.InProgress or BrowserDownloadState.Paused;
 
     /// <summary>A private download lives in the session only and is never written to the store.</summary>
     public bool IsPrivate => SessionKind == BrowserSessionKind.Private;
@@ -72,5 +80,13 @@ public sealed class BrowserDownload
         DateTime completedUtc,
         ulong? totalBytes = null,
         string? interruptReason = null) =>
-        new(Id, SourceUrl, FileName, TargetFilePath, state, StartedUtc, SessionKind, completedUtc, totalBytes, interruptReason);
+        new(Id, SourceUrl, FileName, TargetFilePath, state, StartedUtc, SessionKind, completedUtc, totalBytes, interruptReason, ReceivedBytes);
+
+    /// <summary>The same download with a different live state, keeping its progress.</summary>
+    public BrowserDownload WithState(BrowserDownloadState state) =>
+        new(Id, SourceUrl, FileName, TargetFilePath, state, StartedUtc, SessionKind, CompletedUtc, TotalBytes, InterruptReason, ReceivedBytes);
+
+    /// <summary>The same download with the bytes that have arrived so far.</summary>
+    public BrowserDownload WithProgress(ulong receivedBytes) =>
+        new(Id, SourceUrl, FileName, TargetFilePath, State, StartedUtc, SessionKind, CompletedUtc, TotalBytes, InterruptReason, receivedBytes);
 }

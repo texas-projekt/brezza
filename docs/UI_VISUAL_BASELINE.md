@@ -101,7 +101,8 @@ The cookies panel is deliberately not a scenario: its rows are the machine's own
 screenshot of it is not a reproducible baseline. The downloads panel is one: its rows come from a
 seeded `downloads.xml`, which is exactly what the store loads at startup. Its row timestamps are
 rendered in the capturing machine's local time zone, so a re-capture elsewhere shows the same
-layout with different times.
+layout with different times. A running download is not a scenario: the store holds only finished
+records, so a seeded list cannot show progress or the pause and cancel buttons.
 
 ## Environment notes
 

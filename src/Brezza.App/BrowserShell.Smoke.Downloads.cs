@@ -2,8 +2,10 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Brezza.App.Native;
+using Brezza.Core.Abstractions;
 using Brezza.Core.Downloads;
 
 // Debug-only smoke helpers for downloads: a real attachment from the local test origin, the file
@@ -122,6 +124,113 @@ internal sealed partial class BrowserShell
         if (restored < 1)
         {
             throw new InvalidOperationException("The download list was not restored from the store: " + restored + " entry(s).");
+        }
+    }
+
+    /// <summary>
+    /// Drives a running download through the panel's own controls. The slow attachment streams in
+    /// chunks, so a download is still running when the panel pauses it, resumes it, and lets it
+    /// finish; a second one is cancelled behind its confirmation. The row buttons are clicked the
+    /// way a mouse clicks them, so the hit-testing the panel ships is what runs.
+    /// </summary>
+    private async Task AssertDownloadControlsAsync()
+    {
+        var slowUrl = Environment.GetEnvironmentVariable("BREZZA_SMOKE_SLOW_DOWNLOAD_PAGE");
+        if (string.IsNullOrWhiteSpace(slowUrl))
+        {
+            throw new InvalidOperationException("The smoke slow download page URL is missing.");
+        }
+
+        var writtenFiles = new List<string>();
+        try
+        {
+            // The running download reports the bytes that have arrived before it can be paused.
+            await NavigateThroughAddressBarAsync(slowUrl);
+            await WaitForAsync(() => _downloads!.Downloads.Any(item =>
+                item.IsRunning && item.ReceivedBytes > 0), TimeSpan.FromSeconds(20));
+            writtenFiles.Add(_downloads!.Downloads.First(item => item.IsRunning).TargetFilePath);
+
+            await OpenPanelAndWaitAsync("downloads");
+            await ClickPanelRowButtonAsync(PanelRowButton.Pause, 0);
+            await WaitForAsync(() => _downloads!.Downloads.Any(item => item.State == BrowserDownloadState.Paused),
+                TimeSpan.FromSeconds(10));
+
+            // A paused download keeps its place in the list and the bytes it had arrived.
+            var paused = _downloads!.Downloads.First(item => item.State == BrowserDownloadState.Paused);
+            if (paused.ReceivedBytes is not > 0)
+            {
+                throw new InvalidOperationException("The paused download lost the bytes it had arrived.");
+            }
+
+            await ClickPanelRowButtonAsync(PanelRowButton.Resume, 0);
+            await WaitForAsync(() => _downloads!.Downloads.Any(item => item.State == BrowserDownloadState.InProgress),
+                TimeSpan.FromSeconds(10));
+            await ClosePanelAndWaitAsync();
+
+            await WaitForAsync(() => _downloads!.Downloads.Any(item => item.State == BrowserDownloadState.Completed),
+                TimeSpan.FromSeconds(30));
+
+            // A cancelled download ends interrupted, and its partial file is dropped.
+            await NavigateThroughAddressBarAsync(slowUrl);
+            await WaitForAsync(() => _downloads!.Downloads.Any(item => item.State == BrowserDownloadState.InProgress),
+                TimeSpan.FromSeconds(20));
+            writtenFiles.Add(_downloads!.Downloads.First(item => item.State == BrowserDownloadState.InProgress).TargetFilePath);
+
+            await OpenPanelAndWaitAsync("downloads");
+            await ClickPanelRowButtonAsync(PanelRowButton.Cancel, 0);
+            var dialog = await WaitForOwnedDialogAsync(TimeSpan.FromSeconds(5));
+            if (dialog == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Cancelling a download opened no confirmation.");
+            }
+
+            await ConfirmDialogAsync(dialog);
+            await WaitForAsync(() => _downloads!.Downloads.Any(item =>
+                item.State == BrowserDownloadState.Interrupted), TimeSpan.FromSeconds(10));
+            await ClosePanelAndWaitAsync();
+        }
+        finally
+        {
+            // A cancelled download drops its own partial file, so only the finished one is left to
+            // remove; the real downloads folder is left as it was.
+            foreach (var file in writtenFiles)
+            {
+                try { File.Delete(file); }
+                catch (IOException) { }
+            }
+        }
+    }
+
+    /// <summary>Clicks a row button in the open panel, the way a mouse press and release does.</summary>
+    private async Task ClickPanelRowButtonAsync(PanelRowButton button, int row)
+    {
+        var panel = await FindPanelWindowAsync();
+        var list = NativeMethods.GetDlgItem(panel, InternalPanelWindow.IdList);
+
+        var buffer = Marshal.AllocCoTaskMem(Marshal.SizeOf<NativeMethods.RECT>());
+        try
+        {
+            NativeMethods.SendMessage(list, 0x0198 /* LB_GETITEMRECT */, new IntPtr(row), buffer);
+            var rect = Marshal.PtrToStructure<NativeMethods.RECT>(buffer);
+
+            // The buttons sit inside the right edge of the row, counted from the right.
+            const int size = 28;
+            const int inset = 10;
+            const int gap = 4;
+            var right = rect.right - inset - size / 2;
+            var centre = button switch
+            {
+                PanelRowButton.Remove => right,
+                PanelRowButton.Cancel or PanelRowButton.Folder => right - (size + gap),
+                _ => right - 2 * (size + gap),
+            };
+            var point = new IntPtr(((rect.top + rect.Height / 2) << 16) | (centre & 0xFFFF));
+            NativeMethods.PostMessage(list, NativeMethods.WM_LBUTTONDOWN, new IntPtr(1), point);
+            NativeMethods.PostMessage(list, NativeMethods.WM_LBUTTONUP, IntPtr.Zero, point);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(buffer);
         }
     }
 }

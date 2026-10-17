@@ -8,6 +8,11 @@ public enum BrowserDownloadState
     InProgress,
     Completed,
     Interrupted,
+
+    /// <summary>
+    /// A running download the user paused. It is not a finished record, so it is never persisted.
+    /// </summary>
+    Paused,
 }
 
 /// <summary>A download changed state, so the shell can report success or the failure reason.</summary>

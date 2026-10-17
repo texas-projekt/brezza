@@ -474,6 +474,10 @@ internal sealed partial class BrowserShell
         // and managed through the downloads panel's own actions.
         await AssertDownloadsPanelAsync();
 
+        // 15. A running download is paused and resumed from its row, and cancelled behind its own
+        // confirmation.
+        await AssertDownloadControlsAsync();
+
         // Leave the session on the ordinary smoke page again, so the saved session can be verified.
         await NavigateThroughAddressBarAsync(pageUri.AbsoluteUri);
         await WaitForAsync(() =>

@@ -51,6 +51,8 @@ public sealed class TabRuntimeManager
     /// <summary>A download changed state in any tab.</summary>
     public event EventHandler<DownloadStatusChangedEventArgs>? DownloadStatusChanged;
 
+    public event EventHandler<DownloadProgressChangedEventArgs>? DownloadProgressChanged;
+
     /// <summary>A page in any tab asked for a capability.</summary>
     public event EventHandler<PermissionRequestedEventArgs>? PermissionRequested;
 
@@ -171,6 +173,30 @@ public sealed class TabRuntimeManager
         return _hosts.TryGetValue(tabId, out var host)
             ? host.GetFaviconAsync()
             : Task.FromResult<Stream?>(null);
+    }
+
+    /// <summary>
+    /// Pauses a download the browser started. A download belongs to the tab that started it, so the
+    /// command is routed to the host that owns it, whichever tab is active. Returns false when no
+    /// live host has that download.
+    /// </summary>
+    public bool PauseDownload(string targetFilePath) => ActOnDownload(targetFilePath, host => host.TryPauseDownload(targetFilePath));
+
+    /// <summary>Resumes a paused download. Returns false when no live host has that download.</summary>
+    public bool ResumeDownload(string targetFilePath) => ActOnDownload(targetFilePath, host => host.TryResumeDownload(targetFilePath));
+
+    /// <summary>Cancels a download and drops its partial file. Returns false when no live host has it.</summary>
+    public bool CancelDownload(string targetFilePath) => ActOnDownload(targetFilePath, host => host.TryCancelDownload(targetFilePath));
+
+    private bool ActOnDownload(string targetFilePath, Func<ITabHost, bool> action)
+    {
+        if (_disposed || string.IsNullOrEmpty(targetFilePath)) return false;
+        foreach (var host in _hosts.Values)
+        {
+            if (action(host)) return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -389,6 +415,7 @@ public sealed class TabRuntimeManager
             host.DownloadStarted += (_, args) => DownloadStarted?.Invoke(this, new DownloadStartedEventArgs(
                 args.SourceUrl, args.SuggestedFileName, args.MimeType, args.TargetFilePath, tab.SessionKind));
             host.DownloadStatusChanged += (_, args) => DownloadStatusChanged?.Invoke(this, args);
+            host.DownloadProgressChanged += (_, args) => DownloadProgressChanged?.Invoke(this, args);
             host.PermissionRequested += (_, args) => PermissionRequested?.Invoke(this, args);
             host.NavigationCompleted += (_, result) =>
             {

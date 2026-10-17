@@ -149,7 +149,7 @@ function Write-SeededDownloads()
         '<entry><id>download-b2</id><url>https://files.example.test/media/setup.exe</url><fileName>setup.exe</fileName>' +
         '<targetPath>C:\Users\example\Downloads\setup.exe</targetPath><state>2</state>' +
         '<startedUtcTicks>639277563000000000</startedUtcTicks><completedUtcTicks>639277563110000000</completedUtcTicks>' +
-        '<totalBytes></totalBytes><interruptReason>NetworkError</interruptReason></entry>' +
+        '<totalBytes></totalBytes><interruptReason>NetworkFailed</interruptReason></entry>' +
         '</downloads>')
 }
 

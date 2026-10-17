@@ -1,3 +1,4 @@
+using System.IO;
 using System.Xml.Serialization;
 using Brezza.Core.Navigation;
 
@@ -6,7 +7,7 @@ namespace Brezza.Persistence;
 [XmlRoot("settings")]
 public sealed class BrowserSettings
 {
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
 
     [XmlAttribute("schemaVersion")]
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
@@ -24,6 +25,13 @@ public sealed class BrowserSettings
     [XmlElement("startupBehavior")]
     public BrowserStartupBehavior StartupBehavior { get; set; } = BrowserStartupBehavior.NewTab;
 
+    /// <summary>
+    /// The folder downloads are written to. Empty means the user's own Downloads folder, which is
+    /// what the browser uses until another one is picked; the value is a full path.
+    /// </summary>
+    [XmlElement("downloadsFolder")]
+    public string DownloadsFolder { get; set; } = string.Empty;
+
     public static string NormalizeLanguage(string? language)
     {
         if (string.Equals(language, "zh-Hans", System.StringComparison.OrdinalIgnoreCase)) return "zh-Hans";
@@ -40,4 +48,24 @@ public sealed class BrowserSettings
         behavior == BrowserStartupBehavior.RestoreSession
             ? BrowserStartupBehavior.RestoreSession
             : BrowserStartupBehavior.NewTab;
+
+    /// <summary>
+    /// Normalizes the downloads folder to a full path. An empty, whitespace, or unparsable value
+    /// falls back to empty, which is the user's own Downloads folder rather than a folder the
+    /// browser would fail to write to.
+    /// </summary>
+    public static string NormalizeDownloadsFolder(string? folder)
+    {
+        var value = (folder ?? string.Empty).Trim();
+        if (value.Length == 0) return string.Empty;
+
+        try
+        {
+            return Path.GetFullPath(value);
+        }
+        catch (Exception exception) when (exception is System.ArgumentException or System.NotSupportedException or System.IO.PathTooLongException)
+        {
+            return string.Empty;
+        }
+    }
 }

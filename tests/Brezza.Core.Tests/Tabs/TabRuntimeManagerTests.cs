@@ -482,6 +482,33 @@ public sealed class TabRuntimeManagerTests
     }
 
     [Fact]
+    public async Task Download_progress_and_commands_reach_the_tab_that_owns_the_download()
+    {
+        var context = await CreateTwoTabsAsync();
+        DownloadProgressChangedEventArgs? progress = null;
+        context.Manager.DownloadProgressChanged += (_, args) => progress = args;
+
+        // A download belongs to the tab that started it, so the command is routed to that tab's
+        // host whatever tab is active.
+        context.BackgroundHost.OwnDownload("C:\\Downloads\\file.pdf");
+        context.BackgroundHost.RaiseDownloadProgress("C:\\Downloads\\file.pdf", 512, 2048);
+
+        Assert.Equal("C:\\Downloads\\file.pdf", progress?.TargetFilePath);
+        Assert.Equal(512UL, progress?.ReceivedBytes);
+        Assert.Equal(2048UL, progress?.TotalBytes);
+
+        Assert.True(context.Manager.PauseDownload("C:\\Downloads\\file.pdf"));
+        Assert.Equal("C:\\Downloads\\file.pdf", context.BackgroundHost.PausedPath);
+        Assert.True(context.Manager.ResumeDownload("C:\\Downloads\\file.pdf"));
+        Assert.Equal("C:\\Downloads\\file.pdf", context.BackgroundHost.ResumedPath);
+        Assert.True(context.Manager.CancelDownload("C:\\Downloads\\file.pdf"));
+        Assert.Equal("C:\\Downloads\\file.pdf", context.BackgroundHost.CancelledPath);
+
+        // A path no live host owns is not a command the manager can carry out.
+        Assert.False(context.Manager.PauseDownload("C:\\Downloads\\missing.pdf"));
+    }
+
+    [Fact]
     public async Task A_popup_without_a_target_is_reported_as_a_blank_window()
     {
         var context = await CreateTwoTabsAsync();
@@ -695,7 +722,49 @@ public sealed class TabRuntimeManagerTests
 
         public event EventHandler<DownloadStatusChangedEventArgs>? DownloadStatusChanged;
 
+        public event EventHandler<DownloadProgressChangedEventArgs>? DownloadProgressChanged;
+
         public event EventHandler<PermissionRequestedEventArgs>? PermissionRequested;
+
+        public bool TryPauseDownload(string targetFilePath)
+        {
+            if (!OwnsDownload(targetFilePath)) return false;
+            PausedPath = targetFilePath;
+            return true;
+        }
+
+        public bool TryResumeDownload(string targetFilePath)
+        {
+            if (!OwnsDownload(targetFilePath)) return false;
+            ResumedPath = targetFilePath;
+            return true;
+        }
+
+        public bool TryCancelDownload(string targetFilePath)
+        {
+            if (!OwnsDownload(targetFilePath)) return false;
+            CancelledPath = targetFilePath;
+            return true;
+        }
+
+        /// <summary>
+        /// Marks a download as one this host is running, the way the real adapter tracks the
+        /// operations it owns, so a command is answered only by the host that has it.
+        /// </summary>
+        public void OwnDownload(string targetFilePath) => OwnedDownloads.Add(targetFilePath);
+
+        private bool OwnsDownload(string targetFilePath) => OwnedDownloads.Contains(targetFilePath);
+
+        private HashSet<string> OwnedDownloads { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>The last path <see cref="TryPauseDownload"/> was asked about.</summary>
+        public string? PausedPath { get; private set; }
+
+        /// <summary>The last path <see cref="TryResumeDownload"/> was asked about.</summary>
+        public string? ResumedPath { get; private set; }
+
+        /// <summary>The last path <see cref="TryCancelDownload"/> was asked about.</summary>
+        public string? CancelledPath { get; private set; }
 
         public Task NavigateAsync(Uri uri)
         {
@@ -738,6 +807,9 @@ public sealed class TabRuntimeManagerTests
 
         public void RaiseDownloadStatus(BrowserDownloadState state, string targetPath, string? interruptReason = null) =>
             DownloadStatusChanged?.Invoke(this, new DownloadStatusChangedEventArgs(state, targetPath, "https://example.com/file", 10, interruptReason));
+
+        public void RaiseDownloadProgress(string targetPath, ulong receivedBytes, ulong? totalBytes = null) =>
+            DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedEventArgs(targetPath, receivedBytes, totalBytes));
 
         public void RaisePermission(BrowserPermissionKind kind, string sourceUrl, bool isAllowed) =>
             PermissionRequested?.Invoke(this, new PermissionRequestedEventArgs(kind, sourceUrl, isAllowed));

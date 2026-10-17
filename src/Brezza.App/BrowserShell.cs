@@ -44,6 +44,10 @@ internal sealed partial class BrowserShell : IDisposable
     private SessionStore? _sessionStore;
     private DownloadStore? _downloadStore;
     private DownloadRegistry? _downloads;
+    private DateTime _lastDownloadProgressUiUtc = DateTime.MinValue;
+
+    /// <summary>How often the downloads panel is refreshed while a download reports progress.</summary>
+    private static readonly TimeSpan DownloadProgressUiInterval = TimeSpan.FromMilliseconds(200);
     private WebView2TabHostFactory? _hostFactory;
     private IBrowserDataManager? _dataManager;
     private TabRegistry? _tabs;
@@ -156,7 +160,9 @@ internal sealed partial class BrowserShell : IDisposable
             _hostFactory = new WebView2TabHostFactory(
                 Path.Combine(_dataRoot, "WebView2"),
                 _window.Handle,
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
+                // The saved folder is normalized on load; an empty value keeps the factory's own
+                // default of the user's Downloads folder.
+                _settings?.DownloadsFolder ?? string.Empty,
                 PaletteSurfaceColor());
 
             // The factory owns the profiles, so it is also the browser's data manager: the shell
@@ -172,6 +178,7 @@ internal sealed partial class BrowserShell : IDisposable
             _runtime.PopupRequested += OnPopupRequested;
             _runtime.DownloadStarted += OnDownloadStarted;
             _runtime.DownloadStatusChanged += OnDownloadStatusChanged;
+            _runtime.DownloadProgressChanged += OnDownloadProgressChanged;
             _runtime.PermissionRequested += OnPermissionRequested;
 
             // The download list is browser state Core owns; the store only persists it. Restoring
@@ -361,15 +368,20 @@ internal sealed partial class BrowserShell : IDisposable
         {
             _panel = new InternalPanelWindow(_localization, _window.Handle, _theme);
             _panel.SaveSettingsRequested += (_, submission) => SaveSettings(
-                submission.SearchTemplate, submission.Language, submission.Theme, submission.StartupBehavior);
+                submission.SearchTemplate, submission.Language, submission.Theme, submission.StartupBehavior,
+                submission.DownloadsFolder);
             _panel.OpenUrlRequested += (_, url) => Observe(async () => await NavigateAsync(url));
             _panel.RemoveEntryRequested += (_, url) => RemoveEntry(url);
             _panel.RemoveCookieRequested += (_, cookie) => RemoveCookie(cookie);
             _panel.ClearHistoryRequested += (_, _) => ClearHistory();
             _panel.ClearBrowsingDataRequested += (_, kinds) => ClearBrowsingData(kinds);
+            _panel.BrowseDownloadFolderRequested += (_, _) => BrowseDownloadFolder();
             _panel.OpenDownloadFileRequested += (_, path) => OpenDownloadFile(path);
             _panel.OpenDownloadFolderRequested += (_, path) => OpenDownloadFolder(path);
             _panel.RemoveDownloadRequested += (_, downloadId) => RemoveDownload(downloadId);
+            _panel.PauseDownloadRequested += (_, path) => PauseDownload(path);
+            _panel.ResumeDownloadRequested += (_, path) => ResumeDownload(path);
+            _panel.CancelDownloadRequested += (_, path) => CancelDownload(path);
             _panel.ClearDownloadsRequested += (_, _) => ClearDownloads();
             _panel.CloseRequested += (_, _) => Observe(async () => await ClosePanelAsync());
         }
@@ -386,7 +398,8 @@ internal sealed partial class BrowserShell : IDisposable
             case "settings":
                 _panel.ShowSettings(_settings?.SearchTemplate ?? string.Empty, _settings?.Language ?? string.Empty,
                     _settings?.Theme ?? BrowserThemeMode.System,
-                    _settings?.StartupBehavior ?? BrowserStartupBehavior.NewTab);
+                    _settings?.StartupBehavior ?? BrowserStartupBehavior.NewTab,
+                    EffectiveDownloadsFolder);
                 break;
             case "history":
                 _panel.ShowEntries(InternalPanelMode.History, HistoryEntries());
@@ -447,7 +460,8 @@ internal sealed partial class BrowserShell : IDisposable
         _panel?.Close();
     }
 
-    private void SaveSettings(string searchTemplate, string language, BrowserThemeMode theme, BrowserStartupBehavior startupBehavior)
+    private void SaveSettings(string searchTemplate, string language, BrowserThemeMode theme,
+        BrowserStartupBehavior startupBehavior, string downloadsFolder)
     {
         if (_settingsStore is null) return;
         try
@@ -458,10 +472,14 @@ internal sealed partial class BrowserShell : IDisposable
                 Language = BrowserSettings.NormalizeLanguage(language),
                 Theme = BrowserSettings.NormalizeTheme(theme),
                 StartupBehavior = BrowserSettings.NormalizeStartupBehavior(startupBehavior),
+                DownloadsFolder = BrowserSettings.NormalizeDownloadsFolder(downloadsFolder),
             };
             _settingsStore.Save(updated);
             _settings = updated;
             _inputParser = new NavigationInputParser(updated.SearchTemplate);
+            // The factory resolves the folder per download, so a new one applies to the next
+            // download without recreating the environments or restarting the browser.
+            if (_hostFactory is not null) _hostFactory.DownloadsFolder = updated.DownloadsFolder;
             _localization.LoadLanguage(EffectiveLanguage);
             _window.ApplyLanguage();
             _panel?.ApplyLanguage();
@@ -476,6 +494,20 @@ internal sealed partial class BrowserShell : IDisposable
             TraceWarning("Settings could not be saved", exception);
             _panel?.SetSettingsResult(false);
         }
+    }
+
+    /// <summary>
+    /// Shows the system folder picker for the downloads folder. The panel owns the dialog, so it
+    /// stays disabled until a folder is picked or the dialog is dismissed, and the field is only
+    /// written when a folder was actually chosen.
+    /// </summary>
+    private void BrowseDownloadFolder()
+    {
+        if (_panel is null || !_panel.IsOpen) return;
+        var picked = NativeFolderPicker.TryPick(
+            _panel.Handle, _settings?.DownloadsFolder, _localization.Get("settings.downloadFolderBrowse"));
+        if (picked is null) return;
+        _panel.SetDownloadFolder(picked);
     }
 
     private void RemoveEntry(string url)
@@ -608,6 +640,14 @@ internal sealed partial class BrowserShell : IDisposable
         if (string.Equals(_panelMode, "downloads", StringComparison.Ordinal)) RefreshPanel();
     }
 
+    /// <summary>
+    /// The folder downloads are written to right now: the saved one, or the factory's default of the
+    /// user's own Downloads folder. The settings form shows it, so the field is never empty.
+    /// </summary>
+    private string EffectiveDownloadsFolder => _settings?.DownloadsFolder is { Length: > 0 } saved
+        ? saved
+        : _hostFactory?.DownloadsFolder ?? string.Empty;
+
     private List<PanelEntry> DownloadEntries() =>
         _downloads?.Downloads
             .Select(download => new PanelEntry(DownloadTitle(download), DownloadDetail(download), download: download))
@@ -630,18 +670,82 @@ internal sealed partial class BrowserShell : IDisposable
         {
             parts.Add(download.SourceUrl);
         }
+
         parts.Add(_localization.Get(DownloadStateKey(download.State)));
-        // The runtime does not always know the size, so it is shown only when it reported one.
-        if (download.TotalBytes is { } bytes) parts.Add(FormatByteSize(bytes));
-        parts.Add((download.CompletedUtc ?? download.StartedUtc).ToLocalTime()
-            .ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
+
+        if (download.IsRunning)
+        {
+            // A running download shows what has arrived against the total, and the share when the
+            // runtime knows one; without a total there is no share, only the bytes.
+            if (download.TotalBytes is { } total && total > 0)
+            {
+                var received = Math.Min(download.ReceivedBytes ?? 0, total);
+                parts.Add(FormatByteSize(received) + " / " + FormatByteSize(total));
+                parts.Add(Percent(received, total));
+            }
+            else if (download.ReceivedBytes is { } arrived)
+            {
+                parts.Add(FormatByteSize(arrived));
+            }
+        }
+        else
+        {
+            // The runtime does not always know the size, so it is shown only when it reported one.
+            if (download.TotalBytes is { } bytes) parts.Add(FormatByteSize(bytes));
+            if (download.State == BrowserDownloadState.Interrupted && !string.IsNullOrWhiteSpace(download.InterruptReason))
+            {
+                parts.Add(LocalizedInterruptReason(download.InterruptReason!));
+            }
+
+            parts.Add((download.CompletedUtc ?? download.StartedUtc).ToLocalTime()
+                .ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
+        }
+
         return string.Join(" • ", parts);
     }
+
+    /// <summary>The whole share of <paramref name="received"/> in <paramref name="total"/>.</summary>
+    private static string Percent(ulong received, ulong total) =>
+        (received >= total ? 100 : (int)Math.Round((double)received / total * 100)).ToString(CultureInfo.InvariantCulture) + "%";
+
+    /// <summary>
+    /// The runtime reports an interrupt reason as a technical name. The ones a user can act on are
+    /// named in their language; anything else is shown as the runtime reported it rather than
+    /// dropped, so a failure is never left unexplained.
+    /// </summary>
+    private string LocalizedInterruptReason(string reason)
+    {
+        var key = InterruptReasonKey(reason);
+        if (key is null) return reason;
+        var text = _localization.Get(key);
+        return string.Equals(text, key, StringComparison.Ordinal) ? reason : text;
+    }
+
+    /// <summary>
+    /// The category a runtime interrupt reason belongs to. The runtime names dozens of reasons; a
+    /// user needs to know whether to retry, free space, or sign in, not which enum it was.
+    /// </summary>
+    private static string? InterruptReasonKey(string reason) => reason switch
+    {
+        "UserCanceled" => "downloads.reason.cancelled",
+        "UserShutdown" => "downloads.reason.browserClosed",
+        "DownloadProcessCrashed" => "downloads.reason.browserProblem",
+        "NetworkFailed" or "NetworkTimeout" or "NetworkDisconnected" or "NetworkServerDown" or "NetworkInvalidRequest"
+            => "downloads.reason.network",
+        "ServerUnauthorized" or "ServerForbidden" or "ServerFailed" or "ServerNoRange" or "ServerBadContent"
+            or "ServerUnexpectedResponse" or "ServerCertificateProblem" or "ServerContentLengthMismatch"
+            or "ServerCrossOriginRedirect" => "downloads.reason.server",
+        "FileFailed" or "FileAccessDenied" or "FileNoSpace" or "FileNameTooLong" or "FileTooLarge"
+            or "FileMalicious" or "FileTransientError" or "FileBlockedByPolicy" or "FileSecurityCheckFailed"
+            or "FileTooShort" or "FileHashMismatch" => "downloads.reason.file",
+        _ => null,
+    };
 
     private static string DownloadStateKey(BrowserDownloadState state) => state switch
     {
         BrowserDownloadState.Completed => "downloads.state.completed",
         BrowserDownloadState.Interrupted => "downloads.state.interrupted",
+        BrowserDownloadState.Paused => "downloads.state.paused",
         _ => "downloads.state.inProgress",
     };
 
@@ -896,11 +1000,38 @@ internal sealed partial class BrowserShell : IDisposable
                 _downloads?.Interrupt(e.TargetFilePath, e.InterruptReason);
                 SendNotice("notice.downloadFailed", (e.InterruptReason ?? "unknown") + ": " + Path.GetFileName(e.TargetFilePath));
                 break;
+            case BrowserDownloadState.Paused:
+                // The adapter reports a pause itself: the runtime keeps the download and its bytes.
+                _downloads?.Pause(e.TargetFilePath);
+                break;
+            case BrowserDownloadState.InProgress:
+                _downloads?.Resume(e.TargetFilePath);
+                break;
         }
 
         SaveDownloads();
         RefreshDownloadsPanel();
     }
+
+    /// <summary>
+    /// Records how much of a download has arrived. The runtime reports progress often, so the
+    /// record keeps every value while the panel is refreshed on a fixed cadence: a fast download
+    /// cannot flood the message loop with repaints, and the list is never saved for progress,
+    /// because only a finished record belongs on the device.
+    /// </summary>
+    private void OnDownloadProgressChanged(object? sender, DownloadProgressChangedEventArgs e)
+    {
+        _downloads?.ReportProgress(e.TargetFilePath, e.ReceivedBytes);
+        if (DateTime.UtcNow - _lastDownloadProgressUiUtc < DownloadProgressUiInterval) return;
+        _lastDownloadProgressUiUtc = DateTime.UtcNow;
+        RefreshDownloadsPanel();
+    }
+
+    private void PauseDownload(string targetFilePath) => _runtime?.PauseDownload(targetFilePath);
+
+    private void ResumeDownload(string targetFilePath) => _runtime?.ResumeDownload(targetFilePath);
+
+    private void CancelDownload(string targetFilePath) => _runtime?.CancelDownload(targetFilePath);
 
     private void OnPermissionRequested(object? sender, PermissionRequestedEventArgs e)
     {

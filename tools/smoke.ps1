@@ -73,11 +73,13 @@ $portFinder.Stop()
 $searchTemplate = "http://127.0.0.1:$cookiePort/search?q={query}"
 $cookieHtml = '<!doctype html><html><head><title>Brezza Cookie Page</title></head><body><h1>Cookie source</h1></body></html>'
 $searchHtml = '<!doctype html><html><head><title>Brezza Search Result</title></head><body><h1>Search result</h1></body></html>'
-# The same origin serves the attachment the downloads smoke drives: the browser writes it to the
-# downloads folder, reports the completion, and lists it in the downloads panel.
+# The same origin serves the attachments the downloads smoke drives: the browser writes them to the
+# downloads folder, reports the completion, and lists them in the downloads panel. The slow one
+# streams in chunks, so a download stays running long enough to pause, resume, and cancel.
 $downloadBody = 'Brezza smoke download.'
+$slowDownloadBody = 'Brezza slow smoke download. ' + ('x' * 80)
 $cookieJob = Start-Job -ScriptBlock {
-    param($port, $smokeHtml, $cookiePageHtml, $searchPageHtml, $downloadBody)
+    param($port, $smokeHtml, $cookiePageHtml, $searchPageHtml, $downloadBody, $slowDownloadBody)
     try {
         $listener = New-Object System.Net.HttpListener
         $listener.Prefixes.Add("http://127.0.0.1:$port/")
@@ -87,7 +89,9 @@ $cookieJob = Start-Job -ScriptBlock {
             $path = $context.Request.Url.AbsolutePath
             $isCookiePage = $path -ieq '/cookie.html'
             $isDownload = $path -ieq '/download'
-            if ($isDownload) {
+            $isSlowDownload = $path -ieq '/slow-download'
+            $isAttachment = $isDownload -or $isSlowDownload
+            if ($isAttachment) {
                 $context.Response.ContentType = 'application/octet-stream'
                 $context.Response.AddHeader('Content-Disposition', 'attachment; filename="brezza-smoke-download.txt"')
             } else {
@@ -95,21 +99,34 @@ $cookieJob = Start-Job -ScriptBlock {
             }
 
             $body = [System.Text.Encoding]::UTF8.GetBytes(
-                $(if ($isCookiePage) { $cookiePageHtml } elseif ($isDownload) { $downloadBody } elseif ($path -ieq '/search') { $searchPageHtml } else { $smokeHtml }))
+                $(if ($isCookiePage) { $cookiePageHtml } elseif ($isDownload) { $downloadBody } elseif ($isSlowDownload) { $slowDownloadBody } elseif ($path -ieq '/search') { $searchPageHtml } else { $smokeHtml }))
             if ($isCookiePage) {
                 $context.Response.Headers.Add('Set-Cookie', 'smokecookie=1; path=/')
                 $context.Response.Headers.Add('Set-Cookie', 'persistcookie=3; path=/; expires=Fri, 13 Feb 2049 12:00:00 GMT')
             }
 
-            $context.Response.ContentLength64 = $body.Length
-            $context.Response.OutputStream.Write($body, 0, $body.Length)
+            if ($isSlowDownload) {
+                # One chunk at a time, so the browser reports progress it can be paused in the
+                # middle of. The content length is sent up front, so the total size is known.
+                $context.Response.ContentLength64 = $body.Length
+                $chunkSize = 2
+                for ($offset = 0; $offset -lt $body.Length; $offset += $chunkSize) {
+                    $count = [Math]::Min($chunkSize, $body.Length - $offset)
+                    $context.Response.OutputStream.Write($body, $offset, $count)
+                    $context.Response.OutputStream.Flush()
+                    Start-Sleep -Milliseconds 250
+                }
+            } else {
+                $context.Response.ContentLength64 = $body.Length
+                $context.Response.OutputStream.Write($body, 0, $body.Length)
+            }
             $context.Response.Close()
         }
     }
     catch {
         # The harness stops this job when the smoke run is over.
     }
-} -ArgumentList $cookiePort, ([System.IO.File]::ReadAllText($pagePath)), $cookieHtml, $searchHtml, $downloadBody
+} -ArgumentList $cookiePort, ([System.IO.File]::ReadAllText($pagePath)), $cookieHtml, $searchHtml, $downloadBody, $slowDownloadBody
 
 [System.IO.File]::WriteAllText(
     (Join-Path $runRoot 'settings.xml'),
@@ -123,6 +140,7 @@ $previous = @{
     SmokeLanguage = $env:BREZZA_SMOKE_LANGUAGE
     SmokeCookiePage = $env:BREZZA_SMOKE_COOKIE_PAGE
     SmokeDownloadPage = $env:BREZZA_SMOKE_DOWNLOAD_PAGE
+    SmokeSlowDownloadPage = $env:BREZZA_SMOKE_SLOW_DOWNLOAD_PAGE
     LongNotice = $env:BREZZA_SMOKE_LONG_NOTICE
     PauseAfterFailure = $env:BREZZA_SMOKE_PAUSE_AFTER_FAILURE_MS
     PauseAfterSettings = $env:BREZZA_SMOKE_PAUSE_AFTER_SETTINGS_MS
@@ -133,6 +151,7 @@ $env:BREZZA_DATA_DIR = $runRoot
 $env:BREZZA_SMOKE_PAGE = [System.Uri]::new($pagePath).AbsoluteUri
 $env:BREZZA_SMOKE_COOKIE_PAGE = "http://127.0.0.1:$cookiePort/cookie.html"
 $env:BREZZA_SMOKE_DOWNLOAD_PAGE = "http://127.0.0.1:$cookiePort/download"
+$env:BREZZA_SMOKE_SLOW_DOWNLOAD_PAGE = "http://127.0.0.1:$cookiePort/slow-download"
 $env:BREZZA_SMOKE_LANGUAGE = 'zh-Hans'
 if ($LongNotice) { $env:BREZZA_SMOKE_LONG_NOTICE = '1' }
 if ($PauseAfterFailureMs -gt 0) { $env:BREZZA_SMOKE_PAUSE_AFTER_FAILURE_MS = "$PauseAfterFailureMs" }
@@ -203,6 +222,7 @@ finally {
         BREZZA_SMOKE_LANGUAGE = $previous.SmokeLanguage
         BREZZA_SMOKE_COOKIE_PAGE = $previous.SmokeCookiePage
         BREZZA_SMOKE_DOWNLOAD_PAGE = $previous.SmokeDownloadPage
+        BREZZA_SMOKE_SLOW_DOWNLOAD_PAGE = $previous.SmokeSlowDownloadPage
         BREZZA_SMOKE_LONG_NOTICE = $previous.LongNotice
         BREZZA_SMOKE_PAUSE_AFTER_FAILURE_MS = $previous.PauseAfterFailure
         BREZZA_SMOKE_PAUSE_AFTER_SETTINGS_MS = $previous.PauseAfterSettings

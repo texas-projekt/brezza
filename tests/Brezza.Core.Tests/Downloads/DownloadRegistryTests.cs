@@ -144,6 +144,54 @@ public sealed class DownloadRegistryTests
     }
 
     [Fact]
+    public void A_running_download_records_the_bytes_that_have_arrived()
+    {
+        var registry = new DownloadRegistry();
+        registry.Start("https://example.com/big.iso", "big.iso", @"C:\Downloads\big.iso", BrowserSessionKind.Normal);
+
+        var progressed = registry.ReportProgress(@"C:\Downloads\big.iso", 4096);
+
+        Assert.NotNull(progressed);
+        Assert.Equal(4096UL, progressed!.ReceivedBytes);
+        Assert.Equal(BrowserDownloadState.InProgress, progressed.State);
+        Assert.Equal(4096UL, registry.Downloads[0].ReceivedBytes);
+    }
+
+    [Fact]
+    public void A_paused_download_keeps_its_place_and_its_bytes_and_is_not_terminal()
+    {
+        var registry = new DownloadRegistry();
+        registry.Start("https://example.com/big.iso", "big.iso", @"C:\Downloads\big.iso", BrowserSessionKind.Normal);
+        registry.ReportProgress(@"C:\Downloads\big.iso", 4096);
+
+        var paused = registry.Pause(@"C:\Downloads\big.iso");
+
+        Assert.NotNull(paused);
+        Assert.Equal(BrowserDownloadState.Paused, paused!.State);
+        Assert.True(paused.IsRunning);
+        // A paused download is not a finished record, so it is never persisted.
+        Assert.False(paused.IsTerminal);
+        Assert.Equal(4096UL, paused.ReceivedBytes);
+
+        var resumed = registry.Resume(@"C:\Downloads\big.iso");
+
+        Assert.NotNull(resumed);
+        Assert.Equal(BrowserDownloadState.InProgress, resumed!.State);
+        Assert.True(resumed.IsRunning);
+        Assert.Equal(4096UL, resumed.ReceivedBytes);
+    }
+
+    [Fact]
+    public void A_command_for_an_unknown_download_changes_nothing()
+    {
+        var registry = new DownloadRegistry();
+
+        Assert.Null(registry.Pause(@"C:\Downloads\missing.iso"));
+        Assert.Null(registry.Resume(@"C:\Downloads\missing.iso"));
+        Assert.Null(registry.ReportProgress(@"C:\Downloads\missing.iso", 10));
+    }
+
+    [Fact]
     public void Every_mutation_reports_the_change()
     {
         var registry = new DownloadRegistry();
