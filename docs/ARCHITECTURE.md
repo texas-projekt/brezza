@@ -28,9 +28,9 @@ flowchart TD
 | Project | Owns | Must not own |
 |---|---|---|
 | `Brezza.App` (`net48`) | Native window and controls, message loop, control layout and DPI, localization, native panel dialogs, composition root | WebView2 COM calls, browser state ownership, a second authoritative copy of browser state |
-| `Brezza.Core` (`netstandard2.0`) | Tab registry/runtime lifecycle, navigation parsing, search providers, sleep policy, cleanup, download naming, permission policy, browsing-data policy | Win32, WPF, WebView2 SDK, filesystem access |
+| `Brezza.Core` (`netstandard2.0`) | Tab registry/runtime lifecycle, navigation parsing, search providers, sleep policy, cleanup, download naming and the download list, permission policy, browsing-data policy | Win32, WPF, WebView2 SDK, filesystem access |
 | `Brezza.WebView2` (`net48`) | Isolated environments, `CoreWebView2Controller` lifetime and event translation, private profiles, profile data access, and cleanup I/O | Search policy, tab ordering, persistence |
-| `Brezza.Persistence` (`netstandard2.0`) | Versioned settings, history, bookmark, and session stores | UI or WebView2 dependencies |
+| `Brezza.Persistence` (`netstandard2.0`) | Versioned settings, history, bookmark, session, and download stores | UI or WebView2 dependencies |
 | `Brezza.Core.Tests` | Deterministic tests of state transitions and policy | WebView2 Runtime behavior |
 
 ## Dependency Rules
@@ -93,17 +93,18 @@ A scroll step moves the strip and clips its region without redrawing either, the
 
 ## Browser-Owned Views
 
-Settings, history, bookmarks, cookies, and browsing data are native panels in one owned dialog
-(`BrezzaInternalPanel`) built from combo boxes, edit fields, a list box, and buttons. The panel
-reports intent (save settings, open a URL, remove an entry, remove a cookie, clear history, clear
-browsing data) and renders the data it is given.
+Settings, history, bookmarks, cookies, browsing data, and downloads are native panels in one owned
+dialog (`BrezzaInternalPanel`) built from combo boxes, edit fields, a list box, and buttons. The
+panel reports intent (save settings, open a URL, remove an entry, remove a cookie, clear history,
+clear browsing data, open a downloaded file or its folder, remove a download, clear downloads) and
+renders the data it is given.
 
 Every panel is a toolbar view with no browser URL of its own (ADR 0010). It is opened from the
-toolbar menu — history (Ctrl+H), bookmarks, cookies, browsing data (Ctrl+Shift+Delete), and
-settings — and closes when the user navigates, switches tabs, presses Escape, or uses the panel's
-own close action. No tab holds a panel, no tab URL names one, and no WebView2 surface is created for
-one. The `brezza` scheme is not navigable any more, so a `brezza://` address typed into the address
-field is searched like any other text.
+toolbar menu — history (Ctrl+H), downloads (Ctrl+J), bookmarks, cookies, browsing data
+(Ctrl+Shift+Delete), and settings — and closes when the user navigates, switches tabs, presses
+Escape, or uses the panel's own close action. No tab holds a panel, no tab URL names one, and no
+WebView2 surface is created for one. The `brezza` scheme is not navigable any more, so a `brezza://`
+address typed into the address field is searched like any other text.
 
 | Panel | Content | Row action | Footer action |
 |---|---|---|---|
@@ -112,6 +113,7 @@ field is searched like any other text.
 | Bookmarks | saved pages (filter, open) | remove entry | — |
 | Cookies | the profile's cookies (filter) | delete that cookie | Clear cookies |
 | Browsing data | the four data categories | clear that category | Clear all |
+| Downloads | finished downloads (filter) | open the file, open its folder, remove the entry | Clear downloads |
 
 The cookies panel lists every cookie the normal profile stores: the name over where it lives, when
 it ends (or that it is a session cookie), and the flags the site set. The browsing-data panel lists
@@ -126,6 +128,7 @@ every outcome is reported through a notice. All of them act on the normal profil
 ## State Ownership
 
 - `TabRegistry` is the source of truth for tab identity, ordering, and the active tab.
+- `DownloadRegistry` is the source of truth for the download list: it records a download when the adapter reports its target file, applies the completion or interruption the runtime reports, and keeps the newest download first. It performs no filesystem I/O, and a private download is flagged so it is never persisted.
 - A tab model is durable browser state. A WebView2 host is a disposable runtime resource and is never stored in a view model. An empty URL is the lightweight new-tab state and has no content host until navigation begins.
 - `TabRuntimeManager` is the single owner of host creation, activation, sleep, and closure. It shares an in-flight host creation task per tab and closes late hosts after tab removal or shutdown.
 - Implemented lifecycle is `Dormant → Creating → Active`, with `Sleeping`, failure, and closing paths. Empty-url tabs are rendered by the native shell; inactive hosts are eligible for bounded sleep.
@@ -153,9 +156,15 @@ Downloads, popups, and permission requests are decided by Core and translated by
 
 | Request | Core contract | App behavior |
 |---|---|---|
-| Download | `BrowserDownloadPaths` sanitizes and de-duplicates the file name using an adapter-supplied existence check; Core performs no filesystem I/O | Downloads go to the configured folder with start/completion/failure notices; the runtime's own download dialog is suppressed |
+| Download | `BrowserDownloadPaths` sanitizes and de-duplicates the file name using an adapter-supplied existence check; Core performs no filesystem I/O | Downloads go to the configured folder with start/completion/failure notices and are listed in the downloads panel; the runtime's own download dialog is suppressed |
 | Popup | `PopupRequested` carries the requested destination and originating session kind | HTTP/HTTPS destinations open in a tab of the same session; blank requests open an empty tab; other schemes are ignored |
 | Permission | `BrowserPermissionPolicy` grants nothing without a prompt | The request is denied and reported through a notice |
+
+A navigation that ends in a download is not a failed page. The runtime aborts it with
+`ConnectionAborted` once the download takes over, so the host reports the completion as
+`TabNavigationResultEventArgs.IsReplacedByDownload` — the same "not a page failure" channel a
+superseded navigation uses — and no failure notice is raised for it. Without that signal a
+successful download ended with "Page could not be loaded" and a tab marked failed.
 
 ## Private Session Cleanup
 
@@ -167,12 +176,14 @@ Downloads, popups, and permission requests are decided by Core and translated by
 
 Cookies and the data sites store are profile data owned by WebView2, not XML stores. Core defines the contract (`IBrowserDataManager` with `GetCookiesAsync`, `RemoveCookieAsync`, `ClearAsync(BrowserBrowsingDataKind)`, `BrowserCookie`, and an observable `BrowsingDataClearResult`) and the adapter implements it against the normal profile's cookie manager and clear-browsing-data API, so the shell reads and clears profile data without touching a WebView2 object. Core owns which categories exist (`Cache`, `SiteData`, `ServiceWorkers`, `Cookies`, and their sum `All`); the adapter maps them onto the runtime's data kinds, so a clear never removes more than the panel showed. Every clear returns an observable result and is reported; a task that clears profile data is never discarded silently. A single deletion is applied by the runtime after the call returns, so the adapter reads the store back until the cookie is gone before it reports success. The adapter reaches the profile through a hidden management controller that is never visible and never navigates, so the data tools work while no tab holds a content host.
 
+The download list is stored the way history and bookmarks are: `DownloadStore` writes a schema-versioned `downloads.xml` through the same temporary-file-and-replace path, and a corrupt or unsupported file falls back to an empty list. It persists only terminal records of normal sessions, because a download that is still running is not a finished record and a private download is never written to the device; the shell saves the store when a download starts, completes, or is interrupted, and when an entry is removed or the list is cleared, so the durable list never lags what the panel shows. The store is the durable copy and `DownloadRegistry` the live one: the shell seeds the registry from the store at startup, so the downloads panel lists finished downloads from earlier sessions whatever the startup behavior is.
+
 ## Release
 
 `tools/package.ps1` publishes `net48` as an x64 framework-dependent ZIP named for the native shell. It verifies required assemblies and the language packs, checks that `WebView2Loader.dll` matches the x64 RID, merges the managed assemblies into one `Brezza.exe` with ILRepack from the pinned local tool (ADR 0009), removes PDB files, the RID-specific native folder, and the unused WPF/WinForms WebView2 assemblies, then starts the extracted application with an isolated data root to verify its native window, controls, and WebView2 content surface; `-SkipLaunchVerification` skips that last step for CI runs without an interactive desktop. The package therefore holds `Brezza.exe`, `WebView2Loader.dll`, and the language packs. Users require Windows/.NET Framework 4.8 and the Evergreen WebView2 Runtime; the .NET 10 SDK and reference-assembly package are build-only dependencies.
 
 ## Verification
 
-Core tests cover URL/search classification, provider presets, persistence recovery, sleep eligibility, host release, observable session cleanup with retry, concurrent activation, private-session cleanup triggering, close-during-create, and shutdown-during-create. `tools/smoke.ps1` drives the real native controls in a Debug build and covers the new-tab page, native panels for settings/history/bookmarks/cookies/browsing data, page navigation, a `brezza://` address being searched instead of opening a panel, the cookies panel's list/filter/row-delete/clear-all through the real controls, the browsing-data panel's category and clear-all actions through the menu command and Ctrl+Shift+Delete, the remote-content boundary (no bridge, no browser assets, no browser-owned page), normal/private tab operations through the native tab strip, private-profile cleanup, failure feedback, and session restore across a second process once the startup setting asks for it, with the default start staying on the new-tab page. The harness serves a local HTTP origin that plants the cookies the panel is driven against and acts as the search provider, so the run stays off the public network. `tools/package.ps1` publishes an x64 framework-dependent bundle with the managed assemblies merged into one executable and smoke-tests it with the installed WebView2 Runtime. The driver is compiled into Debug builds under `#if DEBUG` and split into `BrowserShell.Smoke*.cs` partial files by concern.
+Core tests cover URL/search classification, provider presets, persistence recovery, sleep eligibility, host release, observable session cleanup with retry, concurrent activation, private-session cleanup triggering, close-during-create, and shutdown-during-create. `tools/smoke.ps1` drives the real native controls in a Debug build and covers the new-tab page, native panels for settings/history/bookmarks/cookies/browsing data/downloads, page navigation, a `brezza://` address being searched instead of opening a panel, the cookies panel's list/filter/row-delete/clear-all through the real controls, the browsing-data panel's category and clear-all actions through the menu command and Ctrl+Shift+Delete, a real download from the local origin with the downloads panel's list, filter, row-remove, and confirmed clear-all and the restored list in the next process, the remote-content boundary (no bridge, no browser assets, no browser-owned page), normal/private tab operations through the native tab strip, private-profile cleanup, failure feedback, and session restore across a second process once the startup setting asks for it, with the default start staying on the new-tab page. The harness serves a local HTTP origin that plants the cookies the panel is driven against and acts as the search provider, so the run stays off the public network. `tools/package.ps1` publishes an x64 framework-dependent bundle with the managed assemblies merged into one executable and smoke-tests it with the installed WebView2 Runtime. The driver is compiled into Debug builds under `#if DEBUG` and split into `BrowserShell.Smoke*.cs` partial files by concern.
 
 GitHub Actions runs two workflows: `ci.yml` restores, builds Release, and runs the Core tests through `tools/test.ps1 -Stage Unit` on pushes and pull requests to `main`, uploading the TRX results; `release.yml` runs on a `v*` tag push (or a manual run naming a tag), builds and tests the same way, packages with the merge, and publishes a GitHub Release whose pre-release flag follows a suffix in the tag. The Windows smoke and the package launch check need an interactive desktop and the WebView2 Runtime, so neither runs in CI.

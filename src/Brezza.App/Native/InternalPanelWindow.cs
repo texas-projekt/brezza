@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Brezza.App.Native;
+using Brezza.Core.Abstractions;
+using Brezza.Core.Downloads;
 using Brezza.Core.Navigation;
 using Brezza.Core.Privacy;
 using Brezza.Persistence;
@@ -17,20 +19,21 @@ internal enum InternalPanelMode
     Bookmarks,
     Cookies,
     BrowsingData,
+    Downloads,
 }
 
-/// <summary>
-/// One row of the history, bookmarks, cookies, or browsing-data panel. A row carries what it acts
-/// on: a page to open, a cookie to delete, or a category of browsing data to clear.
-/// </summary>
+/// <summary>One row of the history, bookmarks, cookies, browsing-data, or downloads panel. A row
+/// carries what it acts on: a page to open, a cookie to delete, a category of browsing data to
+/// clear, or a download to open or remove.</summary>
 internal sealed class PanelEntry
 {
-    public PanelEntry(string title, string url, BrowserCookie? cookie = null, BrowserBrowsingDataKind? dataKind = null)
+    public PanelEntry(string title, string url, BrowserCookie? cookie = null, BrowserBrowsingDataKind? dataKind = null, BrowserDownload? download = null)
     {
         Title = title;
         Url = url;
         Cookie = cookie;
         DataKind = dataKind;
+        Download = download;
     }
 
     public string Title { get; }
@@ -42,6 +45,21 @@ internal sealed class PanelEntry
 
     /// <summary>The browsing-data category this row clears, for the browsing-data panel.</summary>
     public BrowserBrowsingDataKind? DataKind { get; }
+
+    /// <summary>The download this row manages, for the downloads panel.</summary>
+    public BrowserDownload? Download { get; }
+}
+
+/// <summary>The row button a point in a list row is on.</summary>
+internal enum PanelRowButton
+{
+    None,
+
+    /// <summary>Opens the folder a download was written to.</summary>
+    Folder,
+
+    /// <summary>Removes the row's own entry.</summary>
+    Remove,
 }
 
 /// <summary>Settings the user submitted from the native settings panel.</summary>
@@ -66,16 +84,17 @@ internal readonly struct SettingsSubmission
 
 /// <summary>
 /// The native panels that replace the former HTML internal pages. Settings, history, bookmarks,
-/// cookies, and browsing data are ordinary Win32 controls in one dialog owned by the browser
-/// window; the panel reports user intent and renders the data it is given. Every mode is a toolbar
-/// view without a browser URL of its own.
+/// cookies, browsing data, and downloads are ordinary Win32 controls in one dialog owned by the
+/// browser window; the panel reports user intent and renders the data it is given. Every mode is a
+/// toolbar view without a browser URL of its own.
 /// </summary>
 /// <remarks>
 /// Layout: a heading and subtitle, then either a label/field form with a Save/Cancel footer
-/// (settings) or a search field over a two-line list (history, bookmarks, cookies). List rows act
-/// on themselves: a click opens the page, the row's remove button (or Delete) removes it, and Enter
-/// opens the selected row. The browsing-data panel is a list of the four data categories with a
-/// Clear all footer. Escape closes the panel; in settings it also discards unsaved changes.
+/// (settings) or a search field over a two-line list (history, bookmarks, cookies, downloads).
+/// List rows act on themselves: a click opens the page or the downloaded file, the row's remove
+/// button (or Delete) removes it, and Enter opens the selected row. The browsing-data panel is a
+/// list of the four data categories with a Clear all footer. Escape closes the panel; in settings
+/// it also discards unsaved changes.
 /// </remarks>
 internal sealed class InternalPanelWindow : IDisposable
 {
@@ -106,6 +125,7 @@ internal sealed class InternalPanelWindow : IDisposable
     private const int FooterHeight = 64;
     private const int RemoveButtonSize = 28;
     private const string GlyphRemove = "\uE711";
+    private const string GlyphFolder = "\uE8B7";
 
     private readonly NativeMethods.WndProc _wndProc;
     private readonly Localization _localization;
@@ -142,7 +162,7 @@ internal sealed class InternalPanelWindow : IDisposable
 
     private readonly NativeMethods.SubClassProc _listSubclass;
     private int _hotRow = -1;
-    private bool _hotRemove;
+    private PanelRowButton _hotButton;
     private int _pressedRow = -1;
 
     private readonly List<PanelEntry> _entries = new();
@@ -173,6 +193,10 @@ internal sealed class InternalPanelWindow : IDisposable
     public event EventHandler<BrowserCookie>? RemoveCookieRequested;
     public event EventHandler? ClearHistoryRequested;
     public event EventHandler<BrowserBrowsingDataKind>? ClearBrowsingDataRequested;
+    public event EventHandler<string>? OpenDownloadFileRequested;
+    public event EventHandler<string>? OpenDownloadFolderRequested;
+    public event EventHandler<string>? RemoveDownloadRequested;
+    public event EventHandler? ClearDownloadsRequested;
     public event EventHandler? CloseRequested;
 
     public bool IsOpen => _hwnd != IntPtr.Zero;
@@ -183,12 +207,15 @@ internal sealed class InternalPanelWindow : IDisposable
 
     private bool IsBrowsingData => _mode == InternalPanelMode.BrowsingData;
 
-    /// <summary>A panel that shows a list of entries: history, bookmarks, or cookies.</summary>
+    private bool IsDownloads => _mode == InternalPanelMode.Downloads;
+
+    /// <summary>A panel that shows a list of entries: history, bookmarks, cookies, or downloads.</summary>
     private bool IsList => !IsSettings && !IsBrowsingData;
 
     /// <summary>
     /// A panel whose rows have no page to open: cookies and browsing data act on themselves, so a
-    /// click or Enter on a row does nothing and only the row's own button runs.
+    /// click or Enter on a row does nothing and only the row's own button runs. A downloads row
+    /// opens its file once the download completed, so it is not self-acting.
     /// </summary>
     private bool IsSelfActing => IsCookies || IsBrowsingData;
 
@@ -272,8 +299,6 @@ internal sealed class InternalPanelWindow : IDisposable
     public void ApplyLanguage()
     {
         if (_hwnd == IntPtr.Zero) return;
-        var history = _mode == InternalPanelMode.History;
-        var cookies = IsCookies;
         NativeMethods.SetWindowText(_hwnd, _localization.Get(TitleKey()));
         NativeMethods.SetWindowText(_titleText, _localization.Get(TitleKey()));
         NativeMethods.SetWindowText(_subtitleText, _localization.Get(_mode switch
@@ -281,6 +306,7 @@ internal sealed class InternalPanelWindow : IDisposable
             InternalPanelMode.Settings => "settings.subtitle",
             InternalPanelMode.History => "history.subtitle",
             InternalPanelMode.Cookies => "cookies.subtitle",
+            InternalPanelMode.Downloads => "downloads.subtitle",
             InternalPanelMode.BrowsingData => "data.subtitle",
             _ => "bookmarks.subtitle",
         }));
@@ -290,10 +316,23 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.SetWindowText(_themeLabel, _localization.Get("settings.theme"));
         NativeMethods.SetWindowText(_startupLabel, _localization.Get("settings.startup"));
         NativeMethods.SendMessage(_filterEdit, 0x1501 /* EM_SETCUEBANNER */, new IntPtr(1),
-            _localization.Get(cookies ? "cookies.search" : history ? "history.search" : "bookmarks.search"));
+            _localization.Get(_mode switch
+            {
+                InternalPanelMode.Cookies => "cookies.search",
+                InternalPanelMode.Downloads => "downloads.search",
+                InternalPanelMode.History => "history.search",
+                _ => "bookmarks.search",
+            }));
         NativeMethods.SetWindowText(_emptyText,
-            _localization.Get(cookies ? "cookies.empty" : history ? "history.empty" : "bookmarks.empty"));
-        NativeMethods.SetWindowText(_clearButton, _localization.Get(cookies ? "cookies.clear" : "history.clear"));
+            _localization.Get(_mode switch
+            {
+                InternalPanelMode.Cookies => "cookies.empty",
+                InternalPanelMode.Downloads => "downloads.empty",
+                InternalPanelMode.History => "history.empty",
+                _ => "bookmarks.empty",
+            }));
+        NativeMethods.SetWindowText(_clearButton,
+            _localization.Get(IsDownloads ? "downloads.clear" : IsCookies ? "cookies.clear" : "history.clear"));
         // In browsing-data mode the footer's primary action clears every category and Cancel closes.
         NativeMethods.SetWindowText(_saveButton,
             _localization.Get(IsBrowsingData ? "data.clearAll" : "settings.save"));
@@ -327,6 +366,7 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.DestroyWindow(_hwnd);
         _hwnd = IntPtr.Zero;
         _hotRow = -1;
+        _hotButton = PanelRowButton.None;
         _pressedRow = -1;
     }
 
@@ -887,14 +927,15 @@ internal sealed class InternalPanelWindow : IDisposable
             NativeMethods.SendMessage(_listView, NativeMethods.LB_ADDSTRING, IntPtr.Zero, label);
         }
 
-        var history = _mode == InternalPanelMode.History;
         NativeMethods.SetWindowText(_emptyText, _localization.Get(_entries.Count > 0
             ? "list.noMatches"
-            : IsCookies
-                ? "cookies.empty"
-                : history
-                    ? "history.empty"
-                    : "bookmarks.empty"));
+            : _mode switch
+            {
+                InternalPanelMode.Cookies => "cookies.empty",
+                InternalPanelMode.Downloads => "downloads.empty",
+                InternalPanelMode.History => "history.empty",
+                _ => "bookmarks.empty",
+            }));
         var empty = _visible.Count == 0;
         NativeMethods.ShowWindow(_emptyText, empty ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
         NativeMethods.ShowWindow(_listView, empty ? NativeMethods.SW_HIDE : NativeMethods.SW_SHOW);
@@ -938,12 +979,30 @@ internal sealed class InternalPanelWindow : IDisposable
         var row = (int)item.itemID;
         var text = rect;
         text.left += Scale(14);
-        // Space for the remove button is always reserved, so text does not shift on hover.
-        text.right = RemoveButtonRect(rect).left - Scale(8);
+        // Space for the row buttons is always reserved, so text does not shift on hover.
+        text.right = RowButtonsRight(rect) - Scale(8);
         if (row == _hotRow || (item.itemState & NativeMethods.ODS_SELECTED) != 0)
         {
+            // A downloads row opens the folder its file was written to beside removing the entry;
+            // every other row only removes itself.
+            if (IsDownloads)
+            {
+                var folder = FolderButtonRect(rect);
+                if (row == _hotRow && _hotButton == PanelRowButton.Folder)
+                {
+                    NativePaint.FillRounded(item.hDC, folder, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
+                }
+
+                NativePaint.Text(item.hDC, GlyphFolder, folder, _fonts.SmallIcon, palette.SecondaryText,
+                    NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+            }
+
             var button = RemoveButtonRect(rect);
-            if (row == _hotRow && _hotRemove) NativePaint.FillRounded(item.hDC, button, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
+            if (row == _hotRow && _hotButton == PanelRowButton.Remove)
+            {
+                NativePaint.FillRounded(item.hDC, button, Scale(NativeMetrics.RadiusControl), palette.Hover, _theme);
+            }
+
             NativePaint.Text(item.hDC, GlyphRemove, button, _fonts.SmallIcon, palette.SecondaryText,
                 NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
         }
@@ -969,7 +1028,7 @@ internal sealed class InternalPanelWindow : IDisposable
     {
         if (_clearButton == IntPtr.Zero) return;
         NativeMethods.EnableWindow(_clearButton,
-            _entries.Count > 0 && _mode is InternalPanelMode.History or InternalPanelMode.Cookies);
+            _entries.Count > 0 && _mode is InternalPanelMode.History or InternalPanelMode.Cookies or InternalPanelMode.Downloads);
     }
 
     private int SelectedIndex() =>
@@ -978,15 +1037,45 @@ internal sealed class InternalPanelWindow : IDisposable
     private void Open(int index)
     {
         if (index < 0 || index >= _visible.Count) return;
+        var entry = _visible[index];
         // A cookie or a data category has no page to open; its row button is the only action.
         if (IsSelfActing) return;
-        OpenUrlRequested?.Invoke(this, _visible[index].Url);
+        if (IsDownloads)
+        {
+            // Only a finished file can be opened; a running or failed download has nothing yet.
+            if (entry.Download is { State: BrowserDownloadState.Completed } download)
+            {
+                OpenDownloadFileRequested?.Invoke(this, download.TargetFilePath);
+            }
+
+            return;
+        }
+
+        OpenUrlRequested?.Invoke(this, entry.Url);
+    }
+
+    /// <summary>Opens the folder a download was written to, whatever state the download is in.</summary>
+    private void OpenFolder(int index)
+    {
+        if (index < 0 || index >= _visible.Count) return;
+        if (_visible[index].Download is { } download)
+        {
+            OpenDownloadFolderRequested?.Invoke(this, download.TargetFilePath);
+        }
     }
 
     private void Remove(int index)
     {
         if (index < 0 || index >= _visible.Count) return;
         var entry = _visible[index];
+        if (IsDownloads)
+        {
+            // A list entry is the user's own record, so it goes without a confirmation, like a
+            // bookmark or a history entry. The downloaded file itself is never touched.
+            if (entry.Download is { } download) RemoveDownloadRequested?.Invoke(this, download.Id);
+            return;
+        }
+
         if (IsCookies)
         {
             // A single cookie goes without a confirmation, like a bookmark or a history entry.
@@ -1011,6 +1100,21 @@ internal sealed class InternalPanelWindow : IDisposable
         return NativePaint.Rect(row.right - size - Scale(10), row.top + (row.Height - size) / 2, size, size);
     }
 
+    /// <summary>The open-folder button a downloads row shows left of its remove button.</summary>
+    private NativeMethods.RECT FolderButtonRect(NativeMethods.RECT row)
+    {
+        var remove = RemoveButtonRect(row);
+        var size = Scale(RemoveButtonSize);
+        return NativePaint.Rect(remove.left - size - Scale(4), remove.top, size, size);
+    }
+
+    /// <summary>The left edge of the rightmost button a row shows, so text never runs under one.</summary>
+    private int RowButtonsRight(NativeMethods.RECT row) =>
+        IsDownloads ? FolderButtonRect(row).left : RemoveButtonRect(row).left;
+
+    private static bool IsInRect(int x, int y, NativeMethods.RECT rect) =>
+        x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+
     private NativeMethods.RECT RowRect(int index)
     {
         var rect = new NativeMethods.RECT();
@@ -1018,24 +1122,26 @@ internal sealed class InternalPanelWindow : IDisposable
         return rect;
     }
 
-    /// <summary>The row under a list-box client point, and whether the point is on its remove button.</summary>
-    private (int Row, bool OnRemove) HitTestRow(IntPtr lParam)
+    /// <summary>The row under a list-box client point, and which of its buttons the point is on.</summary>
+    private (int Row, PanelRowButton Button) HitTestRow(IntPtr lParam)
     {
         var result = NativeMethods.SendMessage(_listView, NativeMethods.LB_ITEMFROMPOINT, IntPtr.Zero, lParam).ToInt64();
         var index = (int)(result & 0xFFFF);
-        if ((result >> 16) != 0 || index >= _visible.Count) return (-1, false);
+        if ((result >> 16) != 0 || index >= _visible.Count) return (-1, PanelRowButton.None);
         var x = unchecked((short)NativeMethods.GetLoWord(lParam));
         var y = unchecked((short)NativeMethods.GetHiWord(lParam));
-        var button = RemoveButtonRect(RowRect(index));
-        return (index, x >= button.left && x < button.right && y >= button.top && y < button.bottom);
+        var row = RowRect(index);
+        if (IsInRect(x, y, RemoveButtonRect(row))) return (index, PanelRowButton.Remove);
+        if (IsDownloads && IsInRect(x, y, FolderButtonRect(row))) return (index, PanelRowButton.Folder);
+        return (index, PanelRowButton.None);
     }
 
-    private void SetHotRow(int row, bool onRemove)
+    private void SetHotRow(int row, PanelRowButton button)
     {
-        if (row == _hotRow && onRemove == _hotRemove) return;
+        if (row == _hotRow && button == _hotButton) return;
         var previous = _hotRow;
         _hotRow = row;
-        _hotRemove = onRemove;
+        _hotButton = button;
         InvalidateRow(previous);
         if (row != previous) InvalidateRow(row);
     }
@@ -1047,14 +1153,14 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.InvalidateRect(_listView, ref rect, false);
     }
 
-    /// <summary>Row hover, click to open, the per-row remove button, and the Delete key.</summary>
+    /// <summary>Row hover, click to open, the per-row buttons, and the Delete key.</summary>
     private IntPtr OnListMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, IntPtr id, IntPtr data)
     {
         switch (msg)
         {
             case NativeMethods.WM_MOUSEMOVE:
                 var hover = HitTestRow(lParam);
-                SetHotRow(hover.Row, hover.OnRemove);
+                SetHotRow(hover.Row, hover.Button);
                 var track = new NativeMethods.TRACKMOUSEEVENT
                 {
                     cbSize = (uint)Marshal.SizeOf<NativeMethods.TRACKMOUSEEVENT>(),
@@ -1065,7 +1171,7 @@ internal sealed class InternalPanelWindow : IDisposable
                 break;
 
             case NativeMethods.WM_MOUSELEAVE:
-                SetHotRow(-1, false);
+                SetHotRow(-1, PanelRowButton.None);
                 break;
 
             case NativeMethods.WM_LBUTTONDOWN:
@@ -1082,8 +1188,18 @@ internal sealed class InternalPanelWindow : IDisposable
                 _pressedRow = -1;
                 if (release.Row >= 0 && release.Row == pressed)
                 {
-                    if (release.OnRemove) Remove(release.Row);
-                    else Open(release.Row);
+                    switch (release.Button)
+                    {
+                        case PanelRowButton.Folder:
+                            OpenFolder(release.Row);
+                            break;
+                        case PanelRowButton.Remove:
+                            Remove(release.Row);
+                            break;
+                        default:
+                            Open(release.Row);
+                            break;
+                    }
                 }
 
                 return result;
@@ -1106,6 +1222,13 @@ internal sealed class InternalPanelWindow : IDisposable
         if (_mode == InternalPanelMode.History)
         {
             if (Confirm("history.clearConfirm", "history.clear")) ClearHistoryRequested?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        if (IsDownloads)
+        {
+            // Clearing the list removes the records, never the files that were downloaded.
+            if (Confirm("downloads.clearConfirm", "downloads.clear")) ClearDownloadsRequested?.Invoke(this, EventArgs.Empty);
             return;
         }
 
@@ -1159,6 +1282,7 @@ internal sealed class InternalPanelWindow : IDisposable
         InternalPanelMode.Settings => "settings.title",
         InternalPanelMode.History => "history.title",
         InternalPanelMode.Cookies => "cookies.title",
+        InternalPanelMode.Downloads => "downloads.title",
         InternalPanelMode.BrowsingData => "data.title",
         _ => "bookmarks.title",
     };
@@ -1175,7 +1299,9 @@ internal sealed class InternalPanelWindow : IDisposable
             NativeMethods.ShowWindow(control, IsList || IsBrowsingData ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
         NativeMethods.ShowWindow(_filterEdit, IsList ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
         NativeMethods.ShowWindow(_clearButton,
-            _mode is InternalPanelMode.History or InternalPanelMode.Cookies ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
+            _mode is InternalPanelMode.History or InternalPanelMode.Cookies or InternalPanelMode.Downloads
+                ? NativeMethods.SW_SHOW
+                : NativeMethods.SW_HIDE);
         Layout();
         NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
     }
@@ -1247,7 +1373,7 @@ internal sealed class InternalPanelWindow : IDisposable
         // Clearing a whole list is a list-level action, so it sits beside the search field instead
         // of among the row actions.
         var searchWidth = width;
-        if (_mode is InternalPanelMode.History or InternalPanelMode.Cookies)
+        if (_mode is InternalPanelMode.History or InternalPanelMode.Cookies or InternalPanelMode.Downloads)
         {
             var clearWidth = TextButtonWidth(_clearButton);
             searchWidth = width - clearWidth - Scale(NativeMetrics.SpaceSmall);

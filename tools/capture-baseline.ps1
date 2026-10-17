@@ -135,6 +135,24 @@ function Write-SeededHistory()
         '</history>')
 }
 
+function Write-SeededDownloads()
+{
+    # Two terminal records — one completed with its size, one interrupted with the runtime's
+    # reason — so the downloads panel shows its row layout for both outcomes instead of its empty
+    # state. The store keeps only terminal records, which is exactly what a seeded list holds.
+    [System.IO.File]::WriteAllText((Join-Path $runRoot 'downloads.xml'),
+        '<downloads schemaVersion="1">' +
+        '<entry><id>download-a1</id><url>https://files.example.test/reports/annual-report.pdf</url><fileName>annual-report.pdf</fileName>' +
+        '<targetPath>C:\Users\example\Downloads\annual-report.pdf</targetPath><state>1</state>' +
+        '<startedUtcTicks>639276534000000000</startedUtcTicks><completedUtcTicks>639276534420000000</completedUtcTicks>' +
+        '<totalBytes>2841600</totalBytes><interruptReason></interruptReason></entry>' +
+        '<entry><id>download-b2</id><url>https://files.example.test/media/setup.exe</url><fileName>setup.exe</fileName>' +
+        '<targetPath>C:\Users\example\Downloads\setup.exe</targetPath><state>2</state>' +
+        '<startedUtcTicks>639277563000000000</startedUtcTicks><completedUtcTicks>639277563110000000</completedUtcTicks>' +
+        '<totalBytes></totalBytes><interruptReason>NetworkError</interruptReason></entry>' +
+        '</downloads>')
+}
+
 function Write-SeededSession([string]$url)
 {
     # The shell's own session restore opens this page on launch, so a page-dependent state needs
@@ -278,6 +296,7 @@ try
     Write-Host '== dark shell, English (startup states and native panels)'
     Write-SeededSettings 'Dark' '' $false
     Write-SeededHistory
+    Write-SeededDownloads
     Start-App
 
     Capture 'NewTabDark'
@@ -304,6 +323,9 @@ try
     Close-Panel
     Open-Panel 1015   # IdHistory
     Capture 'HistoryPanel'
+    Close-Panel
+    Open-Panel 1026   # IdDownloads
+    Capture 'DownloadsPanel'
     Close-Panel
     Open-Panel 1016   # IdBookmarks
     Capture 'BookmarksEmpty'

@@ -48,9 +48,10 @@ and build. Re-capturing a scenario replaces its file and its manifest entry.
 | SettingsDarkControls | `artifacts/brezza-settings-combos.png` | Combo-box text and dark surface contrast |
 | SettingsFocus | `artifacts/brezza-settings-focus.png` | Keyboard focus target remains visible and the button layout stays stable |
 | HistoryPanel | `artifacts/brezza-history-panel.png` | Localized button widths and list row layout |
+| DownloadsPanel | `artifacts/brezza-downloads-panel.png` | A completed row with its size and an interrupted one without it, the search field, and the clear action; row timestamps render in the capturing machine's local time zone |
 | BookmarksEmpty | `artifacts/brezza-bookmarks-empty.png` | Empty-state message and disabled actions |
 | DataPanel | `artifacts/brezza-data-panel.png` | The four data categories with what each covers, a clear action per row, and the clear-all footer; no size summary |
-| ToolbarMenu | `artifacts/brezza-toolbar-menu.png` | All five browser-owned views are menu entries: history, bookmarks, cookies, browsing data, and settings |
+| ToolbarMenu | `artifacts/brezza-toolbar-menu.png` | All six browser-owned views are menu entries: history, downloads, bookmarks, cookies, browsing data, and settings |
 | FailureNotice | `artifacts/brezza-notice.png` | Notice text visibility, dark notice palette, reload/dismiss actions |
 | LongNotice | `artifacts/brezza-notice-ellipsis.png` | Long detail text is ellipsized before the reload/dismiss actions |
 | CloseAffordance | `artifacts/brezza-close-tab-button.png` | Discoverable close button without tab-row overlap |
@@ -74,11 +75,11 @@ pwsh tools/test.ps1 -Stage Visual
 ```
 
 It builds Debug, then `tools/capture-baseline.ps1` drives the shell through the scenarios —
-launching it with a seeded data root (theme, language, history, session) and sending the window
-messages a user's input produces: commands by control id and a wheel notch over the tab strip.
-Pages a scenario needs are opened by the shell's own session restore, so no address is typed.
-No application code is involved, so the pass is reproducible; it takes a few minutes and needs
-the interactive desktop.
+launching it with a seeded data root (theme, language, history, session, downloads) and sending the
+window messages a user's input produces: commands by control id and a wheel notch over the tab
+strip. Pages a scenario needs are opened by the shell's own session restore, so no address is
+typed. No application code is involved, so the pass is reproducible; it takes a few minutes and
+needs the interactive desktop.
 
 To re-capture a single scenario after a change to that surface:
 
@@ -97,7 +98,10 @@ Two scenarios are not automatable and keep a manual recipe:
   `pwsh tools/capture-window.ps1 -Scenario LongNotice` in another while the notice is held.
 
 The cookies panel is deliberately not a scenario: its rows are the machine's own cookies, so a
-screenshot of it is not a reproducible baseline.
+screenshot of it is not a reproducible baseline. The downloads panel is one: its rows come from a
+seeded `downloads.xml`, which is exactly what the store loads at startup. Its row timestamps are
+rendered in the capturing machine's local time zone, so a re-capture elsewhere shows the same
+layout with different times.
 
 ## Environment notes
 

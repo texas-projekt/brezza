@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -41,6 +42,8 @@ internal sealed partial class BrowserShell : IDisposable
     private HistoryStore? _historyStore;
     private BookmarkStore? _bookmarkStore;
     private SessionStore? _sessionStore;
+    private DownloadStore? _downloadStore;
+    private DownloadRegistry? _downloads;
     private WebView2TabHostFactory? _hostFactory;
     private IBrowserDataManager? _dataManager;
     private TabRegistry? _tabs;
@@ -115,6 +118,7 @@ internal sealed partial class BrowserShell : IDisposable
             _historyStore = new HistoryStore(Path.Combine(_dataRoot, "history.xml"));
             _bookmarkStore = new BookmarkStore(Path.Combine(_dataRoot, "bookmarks.xml"));
             _sessionStore = new SessionStore(Path.Combine(_dataRoot, "session.xml"));
+            _downloadStore = new DownloadStore(Path.Combine(_dataRoot, "downloads.xml"));
 
             _localization.LoadLanguage(EffectiveLanguage);
             _theme.SetMode(_settings.Theme);
@@ -169,6 +173,12 @@ internal sealed partial class BrowserShell : IDisposable
             _runtime.DownloadStarted += OnDownloadStarted;
             _runtime.DownloadStatusChanged += OnDownloadStatusChanged;
             _runtime.PermissionRequested += OnPermissionRequested;
+
+            // The download list is browser state Core owns; the store only persists it. Restoring
+            // the stored records keeps the list across sessions, and a private download is never
+            // among them because the store never writes one.
+            _downloads = new DownloadRegistry();
+            foreach (var download in _downloadStore!.GetAll()) _downloads.Restore(download);
 
             // The favicon images are fetched by each tab's own host, so the shell only decodes and
             // caches what Core already tracks as the tab's favicon URI.
@@ -298,6 +308,12 @@ internal sealed partial class BrowserShell : IDisposable
                 e.Handled = true;
                 OpenPanel("history");
             }
+            else if (e.VirtualKey == 0x4A)
+            {
+                // Ctrl+J is the standard shortcut for the downloads list.
+                e.Handled = true;
+                OpenPanel("downloads");
+            }
             else if (e.VirtualKey == 0x2E && e.Shift)
             {
                 // Ctrl+Shift+Delete is the standard shortcut for clearing browsing data.
@@ -340,7 +356,7 @@ internal sealed partial class BrowserShell : IDisposable
 
     private void OpenPanel(string mode)
     {
-        if (mode is not ("settings" or "history" or "bookmarks" or "cookies" or "data")) return;
+        if (mode is not ("settings" or "history" or "bookmarks" or "cookies" or "data" or "downloads")) return;
         if (_panel is null)
         {
             _panel = new InternalPanelWindow(_localization, _window.Handle, _theme);
@@ -351,6 +367,10 @@ internal sealed partial class BrowserShell : IDisposable
             _panel.RemoveCookieRequested += (_, cookie) => RemoveCookie(cookie);
             _panel.ClearHistoryRequested += (_, _) => ClearHistory();
             _panel.ClearBrowsingDataRequested += (_, kinds) => ClearBrowsingData(kinds);
+            _panel.OpenDownloadFileRequested += (_, path) => OpenDownloadFile(path);
+            _panel.OpenDownloadFolderRequested += (_, path) => OpenDownloadFolder(path);
+            _panel.RemoveDownloadRequested += (_, downloadId) => RemoveDownload(downloadId);
+            _panel.ClearDownloadsRequested += (_, _) => ClearDownloads();
             _panel.CloseRequested += (_, _) => Observe(async () => await ClosePanelAsync());
         }
 
@@ -380,6 +400,9 @@ internal sealed partial class BrowserShell : IDisposable
                 break;
             case "data":
                 _panel.ShowEntries(InternalPanelMode.BrowsingData, DataCategoryEntries());
+                break;
+            case "downloads":
+                _panel.ShowEntries(InternalPanelMode.Downloads, DownloadEntries());
                 break;
         }
 
@@ -519,6 +542,124 @@ internal sealed partial class BrowserShell : IDisposable
     {
         if (_panel is null || _panelMode is null) return;
         ShowPanel(_panelMode);
+    }
+
+    // ---------- Downloads ----------
+
+    /// <summary>
+    /// Removes one entry from the download list. The record is the user's own, so it goes without
+    /// a confirmation, and the downloaded file itself is never touched.
+    /// </summary>
+    private void RemoveDownload(string downloadId)
+    {
+        if (_downloads?.Remove(downloadId) == true) SaveDownloads();
+        RefreshDownloadsPanel();
+    }
+
+    /// <summary>Clears the whole download list. Only the records go; the files stay where they are.</summary>
+    private void ClearDownloads()
+    {
+        _downloads?.Clear();
+        // The store is rewritten from the now-empty list, so the file holds no entries either.
+        SaveDownloads();
+        RefreshDownloadsPanel();
+    }
+
+    private void OpenDownloadFile(string targetFilePath) => Observe(() =>
+    {
+        // The browser never renders a downloaded file itself; the shell opens it like Explorer does.
+        OpenWithShell(targetFilePath);
+        return Task.CompletedTask;
+    });
+
+    private void OpenDownloadFolder(string targetFilePath) => Observe(() =>
+    {
+        OpenWithShell("explorer.exe", "/select,\"" + targetFilePath + "\"");
+        return Task.CompletedTask;
+    });
+
+    private static void OpenWithShell(string target, string? arguments = null)
+    {
+        var info = new ProcessStartInfo(target) { UseShellExecute = true };
+        if (!string.IsNullOrEmpty(arguments)) info.Arguments = arguments;
+        Process.Start(info);
+    }
+
+    /// <summary>
+    /// Writes the durable download list. The store keeps terminal records of normal sessions only,
+    /// so a download that is still running, or one from a private tab, never reaches the disk.
+    /// </summary>
+    private void SaveDownloads()
+    {
+        if (_downloadStore is null || _downloads is null) return;
+        try
+        {
+            _downloadStore.Save(_downloads.Downloads);
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            TraceWarning("The download list could not be saved", exception);
+        }
+    }
+
+    /// <summary>Refreshes the downloads panel only while it is the panel the user has open.</summary>
+    private void RefreshDownloadsPanel()
+    {
+        if (string.Equals(_panelMode, "downloads", StringComparison.Ordinal)) RefreshPanel();
+    }
+
+    private List<PanelEntry> DownloadEntries() =>
+        _downloads?.Downloads
+            .Select(download => new PanelEntry(DownloadTitle(download), DownloadDetail(download), download: download))
+            .ToList() ?? new List<PanelEntry>();
+
+    private static string DownloadTitle(BrowserDownload download) =>
+        string.IsNullOrWhiteSpace(download.FileName) ? Path.GetFileName(download.TargetFilePath) : download.FileName;
+
+    /// <summary>The second line of a download row: where it came from, how it ended, and when.</summary>
+    private string DownloadDetail(BrowserDownload download)
+    {
+        var parts = new List<string>();
+        // An absolute address can still have no host (a blob or a data URL), and an empty part
+        // would only add a stray separator to the row.
+        if (Uri.TryCreate(download.SourceUrl, UriKind.Absolute, out var source))
+        {
+            if (source.Host.Length > 0) parts.Add(source.Host);
+        }
+        else if (download.SourceUrl.Length > 0)
+        {
+            parts.Add(download.SourceUrl);
+        }
+        parts.Add(_localization.Get(DownloadStateKey(download.State)));
+        // The runtime does not always know the size, so it is shown only when it reported one.
+        if (download.TotalBytes is { } bytes) parts.Add(FormatByteSize(bytes));
+        parts.Add((download.CompletedUtc ?? download.StartedUtc).ToLocalTime()
+            .ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
+        return string.Join(" • ", parts);
+    }
+
+    private static string DownloadStateKey(BrowserDownloadState state) => state switch
+    {
+        BrowserDownloadState.Completed => "downloads.state.completed",
+        BrowserDownloadState.Interrupted => "downloads.state.interrupted",
+        _ => "downloads.state.inProgress",
+    };
+
+    private static string FormatByteSize(ulong bytes)
+    {
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        var size = (double)bytes;
+        var unit = 0;
+        while (size >= 1024 && unit < units.Length - 1)
+        {
+            size /= 1024;
+            unit++;
+        }
+
+        var value = unit == 0
+            ? ((long)size).ToString(CultureInfo.InvariantCulture)
+            : size.ToString("0.#", CultureInfo.InvariantCulture);
+        return value + " " + units[unit];
     }
 
     private List<PanelEntry> HistoryEntries() =>
@@ -731,20 +872,34 @@ internal sealed partial class BrowserShell : IDisposable
         });
     }
 
-    private void OnDownloadStarted(object? sender, DownloadStartedEventArgs e) =>
+    private void OnDownloadStarted(object? sender, DownloadStartedEventArgs e)
+    {
+        if (_downloads is not null)
+        {
+            _downloads.Start(e.SourceUrl, Path.GetFileName(e.TargetFilePath), e.TargetFilePath, e.SessionKind);
+            SaveDownloads();
+        }
+
         SendNotice("notice.downloadStarted", Path.GetFileName(e.TargetFilePath));
+        RefreshDownloadsPanel();
+    }
 
     private void OnDownloadStatusChanged(object? sender, DownloadStatusChangedEventArgs e)
     {
         switch (e.State)
         {
             case BrowserDownloadState.Completed:
+                _downloads?.Complete(e.TargetFilePath, e.TotalBytes);
                 SendNotice("notice.downloadCompleted", Path.GetFileName(e.TargetFilePath));
                 break;
             case BrowserDownloadState.Interrupted:
+                _downloads?.Interrupt(e.TargetFilePath, e.InterruptReason);
                 SendNotice("notice.downloadFailed", (e.InterruptReason ?? "unknown") + ": " + Path.GetFileName(e.TargetFilePath));
                 break;
         }
+
+        SaveDownloads();
+        RefreshDownloadsPanel();
     }
 
     private void OnPermissionRequested(object? sender, PermissionRequestedEventArgs e)
@@ -778,6 +933,10 @@ internal sealed partial class BrowserShell : IDisposable
 
     private void OnPrivateCleanupCompleted(object? sender, SessionCleanupResult result)
     {
+        // A private download is listed while its session is open and is never persisted, so the
+        // session ending is also when its entries leave the list.
+        if (_downloads?.RemovePrivateSession() > 0) RefreshDownloadsPanel();
+
         System.Diagnostics.Trace.TraceInformation(
             "Private session cleanup {0}: {1} after {2} attempt(s); {3}",
             result.State,

@@ -159,6 +159,29 @@ public sealed class TabRuntimeManagerTests
     }
 
     [Fact]
+    public async Task A_navigation_that_ended_in_a_download_is_not_reported_as_a_failure()
+    {
+        // Navigating to an attachment starts a download and the runtime aborts the navigation with
+        // ConnectionAborted once the download takes over. The download reports its own outcome, so
+        // the aborted navigation is not a failed page and does not mark the tab failed.
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var reported = new List<TabNavigationCompletedEventArgs>();
+        manager.NavigationCompleted += (_, args) => reported.Add(args);
+        var activating = manager.ActivateAsync(tab.Id);
+        var host = factory.Complete();
+        await activating;
+
+        host.RaiseNavigationCompleted(false, "ConnectionAborted", replacedByDownload: true);
+        host.RaiseNavigationFailure();
+
+        Assert.Empty(reported);
+        Assert.NotEqual(TabRuntimeState.Failed, registry.Find(tab.Id).State);
+    }
+
+    [Fact]
     public async Task A_real_navigation_failure_is_still_reported()
     {
         var registry = new TabRegistry();
@@ -705,8 +728,8 @@ public sealed class TabRuntimeManagerTests
 
         public void RaiseNavigationFailure() => NavigationFailed?.Invoke(this, EventArgs.Empty);
 
-        public void RaiseNavigationCompleted(bool success, string status, bool superseded = false) =>
-            NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(success, status, superseded));
+        public void RaiseNavigationCompleted(bool success, string status, bool superseded = false, bool replacedByDownload = false) =>
+            NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(success, status, superseded, replacedByDownload));
 
         public void RaisePopup(string? targetUrl) => PopupRequested?.Invoke(this, new PopupRequestedEventArgs(targetUrl));
 

@@ -61,6 +61,7 @@ internal sealed partial class BrowserShell
             "history" => MainWindow.IdHistory,
             "bookmarks" => MainWindow.IdBookmarks,
             "cookies" => MainWindow.IdCookies,
+            "downloads" => MainWindow.IdDownloads,
             _ => MainWindow.IdBrowsingData,
         };
         _window.InvokeCommand(command);
@@ -181,7 +182,12 @@ internal sealed partial class BrowserShell
         var panel = await FindPanelWindowAsync();
         if (panel == IntPtr.Zero) throw new InvalidOperationException("The native " + mode + " panel is not open.");
         var title = NativeMethods.GetWindowText(NativeMethods.GetDlgItem(panel, InternalPanelWindow.IdTitle));
-        var expected = _localization.Get(mode == "history" ? "history.title" : "bookmarks.title");
+        var expected = _localization.Get(mode switch
+        {
+            "history" => "history.title",
+            "downloads" => "downloads.title",
+            _ => "bookmarks.title",
+        });
         if (!string.Equals(title, expected, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(

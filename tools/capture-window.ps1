@@ -41,6 +41,7 @@ $presets = [ordered]@{
     SettingsDarkControls = @{ Class = 'BrezzaInternalPanel'; Width = 0;    Height = 0;   Focus = 0;    File = 'brezza-settings-combos.png' }
     SettingsFocus       = @{ Class = 'BrezzaInternalPanel';  Width = 0;    Height = 0;   Focus = 2016; File = 'brezza-settings-focus.png' }
     HistoryPanel        = @{ Class = 'BrezzaInternalPanel';  Width = 0;    Height = 0;   Focus = 0;    File = 'brezza-history-panel.png' }
+    DownloadsPanel      = @{ Class = 'BrezzaInternalPanel';  Width = 0;    Height = 0;   Focus = 0;    File = 'brezza-downloads-panel.png' }
     BookmarksEmpty      = @{ Class = 'BrezzaInternalPanel';  Width = 0;    Height = 0;   Focus = 0;    File = 'brezza-bookmarks-empty.png' }
     DataPanel           = @{ Class = 'BrezzaInternalPanel';  Width = 0;    Height = 0;   Focus = 0;    File = 'brezza-data-panel.png' }
     ToolbarMenu         = @{ Class = 'BrezzaFlatPopup';      Width = 0;    Height = 0;   Focus = 0;    File = 'brezza-toolbar-menu.png' }

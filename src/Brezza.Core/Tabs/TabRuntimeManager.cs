@@ -345,11 +345,12 @@ public sealed class TabRuntimeManager
     /// <summary>
     /// Whether an unsuccessful navigation ended without the page failing: a newer navigation
     /// replaced it (a reload, a new address, back/forward, or the page navigating itself while it
-    /// was loading), or it was cancelled. The newer navigation reports its own result, so neither is
-    /// shown as a failure.
+    /// was loading), a download took it over, or it was cancelled. The newer navigation reports
+    /// its own result, and a download reports its own outcome, so neither is shown as a failure.
     /// </summary>
     private static bool IsNotAFailure(TabNavigationResultEventArgs result) =>
         result.IsSuperseded ||
+        result.IsReplacedByDownload ||
         string.Equals(result.WebErrorStatus, "OperationCanceled", StringComparison.Ordinal);
 
     private static bool SourcesMatch(string source, Uri uri) =>
@@ -385,7 +386,8 @@ public sealed class TabRuntimeManager
                     PopupRequested?.Invoke(this, new PopupRequestedEventArgs(args.TargetUrl, tab.SessionKind));
                 }
             };
-            host.DownloadStarted += (_, args) => DownloadStarted?.Invoke(this, args);
+            host.DownloadStarted += (_, args) => DownloadStarted?.Invoke(this, new DownloadStartedEventArgs(
+                args.SourceUrl, args.SuggestedFileName, args.MimeType, args.TargetFilePath, tab.SessionKind));
             host.DownloadStatusChanged += (_, args) => DownloadStatusChanged?.Invoke(this, args);
             host.PermissionRequested += (_, args) => PermissionRequested?.Invoke(this, args);
             host.NavigationCompleted += (_, result) =>

@@ -545,10 +545,16 @@ public sealed class WebView2TabHost : ITabHost
     private void OnFaviconChanged(object? sender, object args) =>
         FaviconChanged?.Invoke(this, EventArgs.Empty);
 
+    // Whether the navigation that is currently loading started a download. A navigation that ends
+    // in a download is aborted by the runtime once the download takes over, which is a download
+    // rather than a failed page.
+    private bool _navigationStartedDownload;
+
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs args)
     {
         _isLoading = true;
         _latestNavigationId = args.NavigationId;
+        _navigationStartedDownload = false;
     }
 
 
@@ -604,10 +610,15 @@ public sealed class WebView2TabHost : ITabHost
     {
         var superseded = !isSuccess && navigationId != _latestNavigationId;
 
+        // A navigation that started a download is aborted by the runtime with ConnectionAborted
+        // once the download takes over. That is a download, not a failed page, so it is reported
+        // the same way a replaced navigation is.
+        var replacedByDownload = !isSuccess && _navigationStartedDownload;
+
         // Only the latest navigation decides whether the page is still loading.
         if (!superseded) _isLoading = false;
-        NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(isSuccess, status, superseded));
-        if (!isSuccess && !superseded) NavigationFailed?.Invoke(this, EventArgs.Empty);
+        NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(isSuccess, status, superseded, replacedByDownload));
+        if (!isSuccess && !superseded && !replacedByDownload) NavigationFailed?.Invoke(this, EventArgs.Empty);
     }
 
     // Long enough for a navigation the page started right after aborting the previous one to raise
@@ -636,6 +647,7 @@ public sealed class WebView2TabHost : ITabHost
     private void OnDownloadStarting(object? sender, CoreWebView2DownloadStartingEventArgs args)
     {
         var operation = args.DownloadOperation;
+        _navigationStartedDownload = true;
         var suggested = BrowserDownloadPaths.SuggestedFileNameFrom(operation.ContentDisposition, operation.Uri);
         var target = BrowserDownloadPaths.ResolveTargetPath(_downloadsFolder, suggested, File.Exists);
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
@@ -661,7 +673,9 @@ public sealed class WebView2TabHost : ITabHost
             state,
             operation.ResultFilePath,
             operation.Uri,
-            operation.TotalBytesToReceive,
+            // The runtime reports 0 when it does not know the size; that is an unknown size, not
+            // an empty file, so the shell does not show one that is not real.
+            operation.TotalBytesToReceive == 0 ? null : operation.TotalBytesToReceive,
             state == BrowserDownloadState.Interrupted ? operation.InterruptReason.ToString() : null));
     }
 

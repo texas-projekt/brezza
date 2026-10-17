@@ -45,6 +45,7 @@ internal sealed class MainWindow : IDisposable
     public const int IdStartTitle = 1023;
     public const int IdStartSubtitle = 1024;
     public const int IdBrowsingData = 1025;
+    public const int IdDownloads = 1026;
     public const int IdTitleMinimize = 1031;
     public const int IdTitleMaximize = 1032;
     public const int IdTitleClose = 1033;
@@ -1752,6 +1753,9 @@ internal sealed class MainWindow : IDisposable
             case IdHistory:
                 OpenPanelRequested?.Invoke(this, "history");
                 break;
+            case IdDownloads:
+                OpenPanelRequested?.Invoke(this, "downloads");
+                break;
             case IdBookmarks:
                 OpenPanelRequested?.Invoke(this, "bookmarks");
                 break;
@@ -1788,13 +1792,14 @@ internal sealed class MainWindow : IDisposable
         if (_menu.IsOpen) return;
         var commands = new[]
         {
-            IdNewTab, IdNewPrivateTab, IdHistory, IdBookmarks, IdCookies, IdBrowsingData, IdSettings,
+            IdNewTab, IdNewPrivateTab, IdHistory, IdDownloads, IdBookmarks, IdCookies, IdBrowsingData, IdSettings,
         };
         var items = new[]
         {
             new FlatPopupItem(_localization.Get("tab.newAction"), "Ctrl+T"),
             new FlatPopupItem(_localization.Get("tab.newPrivateAction"), "Ctrl+Shift+N"),
             new FlatPopupItem(_localization.Get("toolbar.history"), "Ctrl+H", separatorBefore: true),
+            new FlatPopupItem(_localization.Get("toolbar.downloads"), "Ctrl+J"),
             new FlatPopupItem(_localization.Get("toolbar.bookmarks")),
             new FlatPopupItem(_localization.Get("toolbar.cookies"), separatorBefore: true),
             new FlatPopupItem(_localization.Get("toolbar.browsingData"), "Ctrl+Shift+Del"),

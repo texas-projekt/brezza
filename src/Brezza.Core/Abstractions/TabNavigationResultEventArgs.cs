@@ -4,11 +4,12 @@ namespace Brezza.Core.Abstractions;
 
 public sealed class TabNavigationResultEventArgs : EventArgs
 {
-    public TabNavigationResultEventArgs(bool isSuccess, string webErrorStatus, bool isSuperseded = false)
+    public TabNavigationResultEventArgs(bool isSuccess, string webErrorStatus, bool isSuperseded = false, bool isReplacedByDownload = false)
     {
         IsSuccess = isSuccess;
         WebErrorStatus = webErrorStatus;
         IsSuperseded = isSuperseded;
+        IsReplacedByDownload = isReplacedByDownload;
     }
 
     public bool IsSuccess { get; }
@@ -21,4 +22,10 @@ public sealed class TabNavigationResultEventArgs : EventArgs
     /// failure of the page, whatever its error status.
     /// </summary>
     public bool IsSuperseded { get; }
+
+    /// <summary>
+    /// The navigation ended in a download instead of a page: the runtime aborts it once the
+    /// download takes over. Like a superseded navigation, it is not a failure of the page.
+    /// </summary>
+    public bool IsReplacedByDownload { get; }
 }

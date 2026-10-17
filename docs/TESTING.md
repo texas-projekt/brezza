@@ -24,9 +24,9 @@ The suite is layered. Each layer has one tool, one command, and a defined place 
   by Git.
 - The smoke driver is compiled into `Brezza.App` under `#if DEBUG` and split into
   `BrowserShell.Smoke*.cs` partial files by concern (navigation, native input, panels, data
-  panels). Driving the real HWNDs from inside the process is deliberate: it exercises the shipped
-  controls rather than a parallel test surface, and the driver needs the shell's internals, which
-  a separate project would not have.
+  panels, downloads). Driving the real HWNDs from inside the process is deliberate: it exercises
+  the shipped controls rather than a parallel test surface, and the driver needs the shell's
+  internals, which a separate project would not have.
 - The smoke page's favicon is a test-tube emoji in an inline SVG data URI: a meaningful icon with
   no asset or license, which the favicon assertions then verify end to end.
 

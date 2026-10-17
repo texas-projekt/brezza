@@ -33,6 +33,7 @@ internal sealed partial class BrowserShell
                     _runtime?.ActiveHost is { } host &&
                     string.Equals(host.Source, pageUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(host.Title, "Brezza Smoke Page", StringComparison.Ordinal), TimeSpan.FromSeconds(20));
+                AssertDownloadListRestored();
                 WriteSmokeResult(resultPath, "PASS: session restored through the native shell.");
                 await ShutdownAsync();
                 return;
@@ -65,13 +66,17 @@ internal sealed partial class BrowserShell
                     throw new InvalidOperationException("The default startup restored an address: " + _window.AddressText);
                 }
 
+                // The session is not restored, but the download list is durable browser state, so it
+                // comes back whatever the startup behavior is.
+                AssertDownloadListRestored();
+
                 WriteSmokeResult(resultPath, "PASS: startup opens the new-tab page by default.");
                 await ShutdownAsync();
                 return;
             }
 
             await RunInitialSmokeAsync(pageUri);
-            WriteSmokeResult(resultPath, "PASS: native controls, tabs, favicons, private cleanup, failure state, toolbar panels, cookie and browsing-data clearing, and remote trust boundary.");
+            WriteSmokeResult(resultPath, "PASS: native controls, tabs, favicons, private cleanup, failure state, toolbar panels, cookie and browsing-data clearing, download management, and remote trust boundary.");
             await ShutdownAsync();
         }
         catch (Exception exception)
@@ -464,6 +469,10 @@ internal sealed partial class BrowserShell
         // one by one, and clear; the browsing-data panel lists the four data categories.
         await AssertCookiesPanelAsync();
         await AssertBrowsingDataPanelAsync();
+
+        // 14. A real download from the local origin is written to the downloads folder, recorded,
+        // and managed through the downloads panel's own actions.
+        await AssertDownloadsPanelAsync();
 
         // Leave the session on the ordinary smoke page again, so the saved session can be verified.
         await NavigateThroughAddressBarAsync(pageUri.AbsoluteUri);

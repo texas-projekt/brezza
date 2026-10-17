@@ -73,8 +73,11 @@ $portFinder.Stop()
 $searchTemplate = "http://127.0.0.1:$cookiePort/search?q={query}"
 $cookieHtml = '<!doctype html><html><head><title>Brezza Cookie Page</title></head><body><h1>Cookie source</h1></body></html>'
 $searchHtml = '<!doctype html><html><head><title>Brezza Search Result</title></head><body><h1>Search result</h1></body></html>'
+# The same origin serves the attachment the downloads smoke drives: the browser writes it to the
+# downloads folder, reports the completion, and lists it in the downloads panel.
+$downloadBody = 'Brezza smoke download.'
 $cookieJob = Start-Job -ScriptBlock {
-    param($port, $smokeHtml, $cookiePageHtml, $searchPageHtml)
+    param($port, $smokeHtml, $cookiePageHtml, $searchPageHtml, $downloadBody)
     try {
         $listener = New-Object System.Net.HttpListener
         $listener.Prefixes.Add("http://127.0.0.1:$port/")
@@ -83,14 +86,21 @@ $cookieJob = Start-Job -ScriptBlock {
             $context = $listener.GetContext()
             $path = $context.Request.Url.AbsolutePath
             $isCookiePage = $path -ieq '/cookie.html'
+            $isDownload = $path -ieq '/download'
+            if ($isDownload) {
+                $context.Response.ContentType = 'application/octet-stream'
+                $context.Response.AddHeader('Content-Disposition', 'attachment; filename="brezza-smoke-download.txt"')
+            } else {
+                $context.Response.ContentType = 'text/html; charset=utf-8'
+            }
+
             $body = [System.Text.Encoding]::UTF8.GetBytes(
-                $(if ($isCookiePage) { $cookiePageHtml } elseif ($path -ieq '/search') { $searchPageHtml } else { $smokeHtml }))
+                $(if ($isCookiePage) { $cookiePageHtml } elseif ($isDownload) { $downloadBody } elseif ($path -ieq '/search') { $searchPageHtml } else { $smokeHtml }))
             if ($isCookiePage) {
                 $context.Response.Headers.Add('Set-Cookie', 'smokecookie=1; path=/')
                 $context.Response.Headers.Add('Set-Cookie', 'persistcookie=3; path=/; expires=Fri, 13 Feb 2049 12:00:00 GMT')
             }
 
-            $context.Response.ContentType = 'text/html; charset=utf-8'
             $context.Response.ContentLength64 = $body.Length
             $context.Response.OutputStream.Write($body, 0, $body.Length)
             $context.Response.Close()
@@ -99,7 +109,7 @@ $cookieJob = Start-Job -ScriptBlock {
     catch {
         # The harness stops this job when the smoke run is over.
     }
-} -ArgumentList $cookiePort, ([System.IO.File]::ReadAllText($pagePath)), $cookieHtml, $searchHtml
+} -ArgumentList $cookiePort, ([System.IO.File]::ReadAllText($pagePath)), $cookieHtml, $searchHtml, $downloadBody
 
 [System.IO.File]::WriteAllText(
     (Join-Path $runRoot 'settings.xml'),
@@ -112,6 +122,7 @@ $previous = @{
     SmokeResult = $env:BREZZA_SMOKE_RESULT
     SmokeLanguage = $env:BREZZA_SMOKE_LANGUAGE
     SmokeCookiePage = $env:BREZZA_SMOKE_COOKIE_PAGE
+    SmokeDownloadPage = $env:BREZZA_SMOKE_DOWNLOAD_PAGE
     LongNotice = $env:BREZZA_SMOKE_LONG_NOTICE
     PauseAfterFailure = $env:BREZZA_SMOKE_PAUSE_AFTER_FAILURE_MS
     PauseAfterSettings = $env:BREZZA_SMOKE_PAUSE_AFTER_SETTINGS_MS
@@ -121,6 +132,7 @@ $previous = @{
 $env:BREZZA_DATA_DIR = $runRoot
 $env:BREZZA_SMOKE_PAGE = [System.Uri]::new($pagePath).AbsoluteUri
 $env:BREZZA_SMOKE_COOKIE_PAGE = "http://127.0.0.1:$cookiePort/cookie.html"
+$env:BREZZA_SMOKE_DOWNLOAD_PAGE = "http://127.0.0.1:$cookiePort/download"
 $env:BREZZA_SMOKE_LANGUAGE = 'zh-Hans'
 if ($LongNotice) { $env:BREZZA_SMOKE_LONG_NOTICE = '1' }
 if ($PauseAfterFailureMs -gt 0) { $env:BREZZA_SMOKE_PAUSE_AFTER_FAILURE_MS = "$PauseAfterFailureMs" }
@@ -190,6 +202,7 @@ finally {
         BREZZA_SMOKE_RESULT = $previous.SmokeResult
         BREZZA_SMOKE_LANGUAGE = $previous.SmokeLanguage
         BREZZA_SMOKE_COOKIE_PAGE = $previous.SmokeCookiePage
+        BREZZA_SMOKE_DOWNLOAD_PAGE = $previous.SmokeDownloadPage
         BREZZA_SMOKE_LONG_NOTICE = $previous.LongNotice
         BREZZA_SMOKE_PAUSE_AFTER_FAILURE_MS = $previous.PauseAfterFailure
         BREZZA_SMOKE_PAUSE_AFTER_SETTINGS_MS = $previous.PauseAfterSettings
