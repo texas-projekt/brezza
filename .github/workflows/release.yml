@@ -20,12 +20,12 @@ jobs:
   package:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # A manual run releases the tag given as input, not the branch it ran on.
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
@@ -55,13 +55,13 @@ jobs:
           -PackageVersion "${{ steps.version.outputs.version }}"
           -SkipLaunchVerification
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: brezza-${{ steps.version.outputs.version }}
           path: dist/*.zip
           retention-days: 30
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           name: ${{ steps.version.outputs.version }}
