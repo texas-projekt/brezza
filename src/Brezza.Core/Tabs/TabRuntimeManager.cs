@@ -5,7 +5,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Brezza.Core.Abstractions;
-using Brezza.Core.Navigation;
 
 namespace Brezza.Core.Tabs;
 
@@ -153,72 +152,6 @@ public sealed class TabRuntimeManager
         var generation = NextGeneration(tabId);
         if (waitForNavigation) await navigation.ConfigureAwait(true);
         else ObserveNavigation(_registry.Find(tabId), navigation, generation);
-    }
-
-    public async Task ResetToNewTabAsync(string tabId)
-    {
-        if (_disposed || !_registry.Contains(tabId)) return;
-
-        var wasActive = _registry.ActiveTab?.Id == tabId;
-        if (wasActive) ActiveHost = null;
-
-        var creating = _creating.TryGetValue(tabId, out var pending) ? pending : null;
-        if (_hosts.TryGetValue(tabId, out var host))
-        {
-            _hosts.Remove(tabId);
-            host.Dispose();
-        }
-        else if (creating is not null)
-        {
-            var created = await creating.ConfigureAwait(true);
-            if (created is not null)
-            {
-                _hosts.Remove(tabId);
-                created.Dispose();
-            }
-        }
-
-        _restoring.Remove(tabId);
-        _navigationGeneration.Remove(tabId);
-        _lastActivatedUtc.Remove(tabId);
-        _registry.SetUrl(tabId, string.Empty);
-        _registry.Update(
-            tabId,
-            title: "New Tab",
-            state: wasActive ? TabRuntimeState.Active : TabRuntimeState.Dormant);
-        if (wasActive) ActiveHostChanged?.Invoke(this, EventArgs.Empty);
-        RuntimeChanged?.Invoke(this, _registry.Find(tabId));
-    }
-
-    /// <summary>
-    /// Releases a tab's content host without changing its logical URL. Used when a tab moves to a
-    /// browser-owned page that the shell renders itself, so no WebView2 surface is left behind.
-    /// </summary>
-    public async Task ReleaseHostAsync(string tabId)
-    {
-        if (_disposed || !_registry.Contains(tabId)) return;
-
-        var wasActive = _registry.ActiveTab?.Id == tabId;
-        if (wasActive) ActiveHost = null;
-
-        var creating = _creating.TryGetValue(tabId, out var pending) ? pending : null;
-        if (_hosts.TryGetValue(tabId, out var host))
-        {
-            _hosts.Remove(tabId);
-            host.Dispose();
-        }
-        else if (creating is not null)
-        {
-            var created = await creating.ConfigureAwait(true);
-            if (created is not null) created.Dispose();
-        }
-
-        _restoring.Remove(tabId);
-        _navigationGeneration.Remove(tabId);
-        _lastActivatedUtc.Remove(tabId);
-        _registry.Update(tabId, state: wasActive ? TabRuntimeState.Active : TabRuntimeState.Dormant);
-        if (wasActive) ActiveHostChanged?.Invoke(this, EventArgs.Empty);
-        RuntimeChanged?.Invoke(this, _registry.Find(tabId));
     }
 
     public void GoBack() => ActiveHost?.GoBack();
@@ -419,13 +352,8 @@ public sealed class TabRuntimeManager
         result.IsSuperseded ||
         string.Equals(result.WebErrorStatus, "OperationCanceled", StringComparison.Ordinal);
 
-    private static bool SourcesMatch(string source, Uri uri)
-    {
-        var expected = NavigationInputParser.IsInternalPage(uri)
-            ? NavigationInputParser.GetCanonicalInternalUrl(uri)
-            : uri.AbsoluteUri;
-        return string.Equals(source, expected, StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool SourcesMatch(string source, Uri uri) =>
+        string.Equals(source, uri.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
 
     private async Task CreateHostAsync(BrowserTab tab, TaskCompletionSource<ITabHost?> completion)
     {

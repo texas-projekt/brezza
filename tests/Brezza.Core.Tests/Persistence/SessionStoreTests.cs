@@ -74,17 +74,19 @@ public sealed class SessionStoreTests
     }
 
     [Fact]
-    public void Restores_brezza_internal_pages()
+    public void Saved_browser_pages_reopen_as_new_tabs()
     {
         using var directory = new TestDirectory();
         var path = Path.Combine(directory.Path, "session.xml");
         File.WriteAllText(path,
-            "<session schemaVersion=\"1\" activeTabId=\"settings\"><tab id=\"settings\"><url>brezza://settings</url></tab></session>");
+            "<session schemaVersion=\"1\" activeTabId=\"settings\">" +
+            "<tab id=\"settings\"><url>brezza://settings</url></tab>" +
+            "<tab id=\"new\"><url>brezza://newtab</url></tab></session>");
 
         var restored = new SessionStore(path).Load();
 
-        var tab = Assert.Single(restored.Tabs!);
-        Assert.Equal("brezza://settings", tab.Url);
+        Assert.Equal(2, restored.Tabs!.Count);
+        Assert.All(restored.Tabs!, tab => Assert.Empty(tab.Url));
     }
 
     [Fact]
@@ -97,20 +99,6 @@ public sealed class SessionStoreTests
 
         var restored = new SessionStore(path).Load();
         Assert.Empty(restored.Tabs![0].Url);
-    }
-
-    [Fact]
-    public void Legacy_new_tab_url_is_migrated_to_an_empty_url()
-    {
-        using var directory = new TestDirectory();
-        var path = Path.Combine(directory.Path, "session.xml");
-        File.WriteAllText(path,
-            "<session schemaVersion=\"1\" activeTabId=\"new\"><tab id=\"new\"><url>brezza://newtab</url></tab></session>");
-
-        var restored = new SessionStore(path).Load();
-
-        var tab = Assert.Single(restored.Tabs!);
-        Assert.Empty(tab.Url);
     }
 
     private sealed class TestDirectory : IDisposable

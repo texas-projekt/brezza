@@ -29,9 +29,8 @@ jobs:
 
       - run: dotnet build Brezza.slnx -c Release --no-restore
 
-      - run: >-
-          dotnet test tests/Brezza.Core.Tests -c Release --no-build
-          --logger trx --results-directory artifacts/test-results
+      # The same entry point developers run locally; CI runs the stage its runners can.
+      - run: pwsh tools/test.ps1 -Stage Unit -Configuration Release
 
       - uses: actions/upload-artifact@v4
         if: always()

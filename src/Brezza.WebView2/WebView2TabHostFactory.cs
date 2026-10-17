@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Brezza.Core.Abstractions;
+using Brezza.Core.Privacy;
 using Brezza.Core.Tabs;
 using Microsoft.Web.WebView2.Core;
 
@@ -21,10 +22,14 @@ public static class WebView2Color
             unchecked((byte)((colorref >> 16) & 0xFF)));
 }
 
-public sealed class WebView2TabHostFactory : ITabHostFactory
+public sealed class WebView2TabHostFactory : ITabHostFactory, IBrowserDataManager
 {
     private static readonly TimeSpan CleanupBudget = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(250);
+
+    // How long a single cookie deletion is given to show up in the store the runtime owns.
+    private static readonly TimeSpan CookieDeleteSettleTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan CookieDeletePollInterval = TimeSpan.FromMilliseconds(50);
 
     private readonly string _userDataRoot;
     private readonly IntPtr _parentWindow;
@@ -36,6 +41,14 @@ public sealed class WebView2TabHostFactory : ITabHostFactory
 
     /// <summary>Private profile folders that are not verified removed yet.</summary>
     private readonly List<string> _pendingPrivateFolders = new();
+
+    // A hidden controller that exists only to reach the normal profile's cookie manager and
+    // clear-browsing-data API. It is created on first use, is never visible, and never navigates,
+    // so the shell can manage profile data while no tab holds a content host. It shares the normal
+    // environment, so it costs no extra browser process, and it lives as long as the app like the
+    // normal environment itself.
+    private CoreWebView2Controller? _managementController;
+    private readonly SemaphoreSlim _managementGate = new(1, 1);
 
     /// <param name="parentWindow">Native window the WebView2 controllers are parented to.</param>
     /// <param name="defaultBackgroundColor">
@@ -133,6 +146,183 @@ public sealed class WebView2TabHostFactory : ITabHostFactory
 
     private static SessionCleanupResult NothingToRemove(BrowserSessionKind sessionKind) =>
         new(sessionKind, SessionCleanupState.Completed, string.Empty, 0, null);
+
+    // ---------- Profile data (IBrowserDataManager) ----------
+
+    public async Task<IReadOnlyList<BrowserCookie>> GetCookiesAsync()
+    {
+        try
+        {
+            var profile = await GetNormalProfileAsync().ConfigureAwait(true);
+            var cookies = await profile.CookieManager.GetCookiesAsync(null).ConfigureAwait(true);
+            return cookies
+                .Select(MapCookie)
+                .OrderBy(cookie => cookie.Domain, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(cookie => cookie.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (Exception exception) when (IsDataAccessFailure(exception))
+        {
+            System.Diagnostics.Trace.TraceWarning("The stored cookies could not be read: {0}", exception.Message);
+            return Array.Empty<BrowserCookie>();
+        }
+    }
+
+    public async Task<BrowsingDataClearResult> RemoveCookieAsync(BrowserCookie cookie)
+    {
+        try
+        {
+            var profile = await GetNormalProfileAsync().ConfigureAwait(true);
+            // The cookie carries its own identity, so deleting it needs no second read of the store.
+            profile.CookieManager.DeleteCookiesWithDomainAndPath(cookie.Name, cookie.Domain, cookie.Path);
+            // A deletion is applied by the runtime after the call returns, so the store is read back
+            // until it agrees: a row that is still listed is a cookie that is still stored.
+            return await WaitUntilCookieIsGoneAsync(profile, cookie).ConfigureAwait(true)
+                ? new BrowsingDataClearResult(BrowsingDataClearState.Completed, null)
+                : new BrowsingDataClearResult(BrowsingDataClearState.Failed, "The cookie is still stored after it was deleted.");
+        }
+        catch (Exception exception) when (IsDataAccessFailure(exception))
+        {
+            System.Diagnostics.Trace.TraceWarning("The cookie could not be deleted: {0}", exception.Message);
+            return new BrowsingDataClearResult(BrowsingDataClearState.Failed, exception.Message);
+        }
+    }
+
+    /// <summary>
+    /// Reads the cookie store back until the deleted cookie is gone, or the settle budget runs out.
+    /// The budget keeps a deletion the runtime never applies from hanging the panel's refresh.
+    /// </summary>
+    private static async Task<bool> WaitUntilCookieIsGoneAsync(CoreWebView2Profile profile, BrowserCookie cookie)
+    {
+        var deadline = DateTime.UtcNow + CookieDeleteSettleTimeout;
+        while (true)
+        {
+            var stored = await profile.CookieManager.GetCookiesAsync(null).ConfigureAwait(true);
+            var stillThere = stored.Any(item =>
+                string.Equals(item.Name, cookie.Name, StringComparison.Ordinal) &&
+                string.Equals(item.Domain, cookie.Domain, StringComparison.Ordinal) &&
+                string.Equals(item.Path, cookie.Path, StringComparison.Ordinal));
+            if (!stillThere) return true;
+            if (DateTime.UtcNow >= deadline) return false;
+            await Task.Delay(CookieDeletePollInterval).ConfigureAwait(true);
+        }
+    }
+
+    public async Task<BrowsingDataClearResult> ClearAsync(BrowserBrowsingDataKind kinds)
+    {
+        if (kinds == BrowserBrowsingDataKind.None)
+        {
+            return new BrowsingDataClearResult(BrowsingDataClearState.Completed, null);
+        }
+
+        try
+        {
+            var profile = await GetNormalProfileAsync().ConfigureAwait(true);
+            await profile.ClearBrowsingDataAsync(MapKinds(kinds)).ConfigureAwait(true);
+            return new BrowsingDataClearResult(BrowsingDataClearState.Completed, null);
+        }
+        catch (Exception exception) when (IsDataAccessFailure(exception))
+        {
+            System.Diagnostics.Trace.TraceWarning("The browsing data could not be cleared: {0}", exception.Message);
+            return new BrowsingDataClearResult(BrowsingDataClearState.Failed, exception.Message);
+        }
+    }
+
+    /// <summary>
+    /// Maps the categories the user is shown onto the runtime data kinds each one covers. The
+    /// mapping belongs to the adapter: Core decides which categories exist, not which runtime
+    /// kinds they name, and <see cref="BrowserBrowsingDataKind.All"/> stays their sum so a clear
+    /// never removes more than the panel showed.
+    /// </summary>
+    private static CoreWebView2BrowsingDataKinds MapKinds(BrowserBrowsingDataKind kinds)
+    {
+        var mapped = default(CoreWebView2BrowsingDataKinds);
+        if (kinds.HasFlag(BrowserBrowsingDataKind.Cache))
+        {
+            mapped |= CoreWebView2BrowsingDataKinds.DiskCache | CoreWebView2BrowsingDataKinds.CacheStorage;
+        }
+
+        if (kinds.HasFlag(BrowserBrowsingDataKind.SiteData))
+        {
+            mapped |= CoreWebView2BrowsingDataKinds.LocalStorage |
+                CoreWebView2BrowsingDataKinds.IndexedDb |
+                CoreWebView2BrowsingDataKinds.WebSql |
+                CoreWebView2BrowsingDataKinds.FileSystems;
+        }
+
+        if (kinds.HasFlag(BrowserBrowsingDataKind.ServiceWorkers))
+        {
+            mapped |= CoreWebView2BrowsingDataKinds.ServiceWorkers;
+        }
+
+        if (kinds.HasFlag(BrowserBrowsingDataKind.Cookies))
+        {
+            mapped |= CoreWebView2BrowsingDataKinds.Cookies;
+        }
+
+        return mapped;
+    }
+
+    private static BrowserCookie MapCookie(CoreWebView2Cookie cookie)
+    {
+        // A session cookie has no expiry; the runtime reports the default date for it.
+        DateTime? expires = cookie.Expires == default ? (DateTime?)null : cookie.Expires;
+        return new BrowserCookie(
+            cookie.Name,
+            cookie.Value,
+            cookie.Domain,
+            cookie.Path,
+            expires,
+            cookie.IsSecure,
+            cookie.IsHttpOnly,
+            cookie.SameSite switch
+            {
+                CoreWebView2CookieSameSiteKind.Lax => BrowserCookieSameSite.Lax,
+                CoreWebView2CookieSameSiteKind.Strict => BrowserCookieSameSite.Strict,
+                _ => BrowserCookieSameSite.None,
+            });
+    }
+
+    private async Task<CoreWebView2Profile> GetNormalProfileAsync()
+    {
+        var controller = await GetManagementControllerAsync().ConfigureAwait(true);
+        return controller.CoreWebView2.Profile;
+    }
+
+    /// <summary>
+    /// The hidden management controller, created once and reused. A failed creation is not cached,
+    /// so a later clear attempt starts a fresh one.
+    /// </summary>
+    private async Task<CoreWebView2Controller> GetManagementControllerAsync()
+    {
+        if (_managementController is not null) return _managementController;
+        await _managementGate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            if (_managementController is not null) return _managementController;
+            var environment = await GetEnvironmentAsync(BrowserSessionKind.Normal).ConfigureAwait(true);
+            var options = CreateControllerOptions(environment, BrowserSessionKind.Normal);
+            var controller = await environment
+                .CreateCoreWebView2ControllerAsync(_parentWindow, options)
+                .ConfigureAwait(true);
+            // The bridge stays disabled so this surface can never become a content surface, and it
+            // is never shown: it exists for the profile's data APIs only.
+            controller.CoreWebView2.Settings.IsWebMessageEnabled = false;
+            controller.IsVisible = false;
+            _managementController = controller;
+            return controller;
+        }
+        finally
+        {
+            _managementGate.Release();
+        }
+    }
+
+    private static bool IsDataAccessFailure(Exception exception) =>
+        exception is InvalidOperationException ||
+            exception is System.Runtime.InteropServices.COMException ||
+            exception is IOException ||
+            exception is UnauthorizedAccessException;
 
     private CoreWebView2ControllerOptions CreateControllerOptions(CoreWebView2Environment environment, BrowserSessionKind sessionKind)
     {

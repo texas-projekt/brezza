@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-12
 - Supersedes: ADR 0003's decision to render the browser chrome as HTML/CSS/JS in a WebView2 surface
+- Superseded in part by: ADR 0010 (browser-owned pages are toolbar views, not internal routes)
 
 ## Context
 

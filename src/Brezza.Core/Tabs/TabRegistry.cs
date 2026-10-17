@@ -38,8 +38,7 @@ public sealed class TabRegistry
         }
 
         var normalizedTitle = title?.Trim() ?? string.Empty;
-        var normalizedUrl = string.Equals(url, "brezza://newtab", StringComparison.OrdinalIgnoreCase) ? string.Empty : url;
-        var tab = new BrowserTab(id, normalizedUrl)
+        var tab = new BrowserTab(id, url)
         {
             Title = normalizedTitle.Length == 0 ? "New Tab" : normalizedTitle,
         };

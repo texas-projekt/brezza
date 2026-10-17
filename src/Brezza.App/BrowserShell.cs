@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -8,6 +9,7 @@ using Brezza.Core.Abstractions;
 using Brezza.Core.Downloads;
 using Brezza.Core.Navigation;
 using Brezza.Core.Permissions;
+using Brezza.Core.Privacy;
 using Brezza.Core.Tabs;
 using Brezza.Persistence;
 using Brezza.WebView2;
@@ -40,6 +42,7 @@ internal sealed partial class BrowserShell : IDisposable
     private BookmarkStore? _bookmarkStore;
     private SessionStore? _sessionStore;
     private WebView2TabHostFactory? _hostFactory;
+    private IBrowserDataManager? _dataManager;
     private TabRegistry? _tabs;
     private TabRuntimeManager? _runtime;
     private TabFaviconCache? _favicons;
@@ -47,7 +50,6 @@ internal sealed partial class BrowserShell : IDisposable
     private InternalPanelWindow? _panel;
 
     private string? _panelMode;
-    private bool _panelOwnedByTab;
     private bool _shutdownStarted;
 
     public BrowserShell()
@@ -153,6 +155,10 @@ internal sealed partial class BrowserShell : IDisposable
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
                 PaletteSurfaceColor());
 
+            // The factory owns the profiles, so it is also the browser's data manager: the shell
+            // never reaches a WebView2 object to read or clear profile data.
+            _dataManager = _hostFactory;
+
             _tabs = new TabRegistry();
             _tabs.Changed += (_, _) => RenderState();
             _runtime = new TabRuntimeManager(_tabs, _hostFactory);
@@ -196,30 +202,16 @@ internal sealed partial class BrowserShell : IDisposable
     // ---------- Commands ----------
 
     private async Task NavigateAsync(string input)
-    { System.Diagnostics.Trace.TraceInformation("NAV: [{0}]", input);
+    {
         if (_tabs?.ActiveTab is null || _runtime is null || _inputParser is null) return;
 
-        // A toolbar-opened panel closes when the user navigates; a panel that belongs to this tab
-        // stays until its tab leaves the internal route.
-        if (_panelMode is not null && !_panelOwnedByTab) _panel?.Close();
+        // Every panel is a toolbar view, so navigating closes it.
+        ClosePanel();
 
         var target = _inputParser.Parse(input);
         if (target.Kind == NavigationTargetKind.Empty || target.Uri is null) return;
 
-        var logicalUrl = NavigationInputParser.IsInternalPage(target.Uri)
-            ? NavigationInputParser.GetCanonicalInternalUrl(target.Uri)
-            : target.Uri.AbsoluteUri;
-
-        if (NavigationInputParser.IsInternalPage(target.Uri))
-        {
-            // A browser-owned page is a native panel, never a WebView2 content host.
-            if (_runtime is not null) await _runtime.ReleaseHostAsync(_tabs.ActiveTab.Id);
-            _tabs.SetUrl(_tabs.ActiveTab.Id, logicalUrl);
-            RenderState();
-            return;
-        }
-
-        _tabs.SetUrl(_tabs.ActiveTab.Id, logicalUrl);
+        _tabs.SetUrl(_tabs.ActiveTab.Id, target.Uri.AbsoluteUri);
         await _runtime.NavigateAsync(_tabs.ActiveTab.Id, target.Uri, waitForNavigation: false);
         RenderState();
         _runtime.ActiveHost?.Focus();
@@ -228,7 +220,7 @@ internal sealed partial class BrowserShell : IDisposable
     private async Task CreateTabAsync(BrowserSessionKind? requestedKind = null)
     {
         if (_tabs is null || _runtime is null) return;
-        if (_panelMode is not null && !_panelOwnedByTab) _panel?.Close();
+        ClosePanel();
         var sessionKind = requestedKind ?? _tabs.ActiveTab?.SessionKind ?? BrowserSessionKind.Normal;
         var tab = _tabs.Create(sessionKind: sessionKind);
         await _runtime.ActivateAsync(tab.Id, waitForNavigation: false);
@@ -238,7 +230,7 @@ internal sealed partial class BrowserShell : IDisposable
     private async Task ActivateTabAsync(string tabId)
     {
         if (_runtime is null) return;
-        if (_panelMode is not null && !_panelOwnedByTab) _panel?.Close();
+        ClosePanel();
         await _runtime.ActivateAsync(tabId);
         RenderState();
     }
@@ -306,6 +298,12 @@ internal sealed partial class BrowserShell : IDisposable
                 e.Handled = true;
                 OpenPanel("history");
             }
+            else if (e.VirtualKey == 0x2E && e.Shift)
+            {
+                // Ctrl+Shift+Delete is the standard shortcut for clearing browsing data.
+                e.Handled = true;
+                OpenPanel("data");
+            }
             else if (e.VirtualKey == 0x52)
             {
                 e.Handled = true;
@@ -342,7 +340,7 @@ internal sealed partial class BrowserShell : IDisposable
 
     private void OpenPanel(string mode)
     {
-        if (mode != "settings" && mode != "history" && mode != "bookmarks") return;
+        if (mode is not ("settings" or "history" or "bookmarks" or "cookies" or "data")) return;
         if (_panel is null)
         {
             _panel = new InternalPanelWindow(_localization, _window.Handle, _theme);
@@ -350,55 +348,80 @@ internal sealed partial class BrowserShell : IDisposable
                 submission.SearchTemplate, submission.Language, submission.Theme, submission.StartupBehavior);
             _panel.OpenUrlRequested += (_, url) => Observe(async () => await NavigateAsync(url));
             _panel.RemoveEntryRequested += (_, url) => RemoveEntry(url);
+            _panel.RemoveCookieRequested += (_, cookie) => RemoveCookie(cookie);
             _panel.ClearHistoryRequested += (_, _) => ClearHistory();
+            _panel.ClearBrowsingDataRequested += (_, kinds) => ClearBrowsingData(kinds);
             _panel.CloseRequested += (_, _) => Observe(async () => await ClosePanelAsync());
         }
 
         _panelMode = mode;
-        _panelOwnedByTab = false;
         ShowPanel(mode);
     }
 
     private void ShowPanel(string mode)
     {
         if (_panel is null) return;
-        if (mode == "settings")
+        switch (mode)
         {
-            _panel.ShowSettings(_settings?.SearchTemplate ?? string.Empty, _settings?.Language ?? string.Empty,
-                _settings?.Theme ?? BrowserThemeMode.System,
-                _settings?.StartupBehavior ?? BrowserStartupBehavior.NewTab);
-        }
-        else
-        {
-            var entries = mode == "history" ? HistoryEntries() : BookmarkEntries();
-            _panel.ShowEntries(mode == "history" ? InternalPanelMode.History : InternalPanelMode.Bookmarks, entries);
+            case "settings":
+                _panel.ShowSettings(_settings?.SearchTemplate ?? string.Empty, _settings?.Language ?? string.Empty,
+                    _settings?.Theme ?? BrowserThemeMode.System,
+                    _settings?.StartupBehavior ?? BrowserStartupBehavior.NewTab);
+                break;
+            case "history":
+                _panel.ShowEntries(InternalPanelMode.History, HistoryEntries());
+                break;
+            case "bookmarks":
+                _panel.ShowEntries(InternalPanelMode.Bookmarks, BookmarkEntries());
+                break;
+            case "cookies":
+                // The cookie list is read from the profile, so this panel opens from an async query.
+                Observe(async () => await ShowCookieEntriesAsync());
+                break;
+            case "data":
+                _panel.ShowEntries(InternalPanelMode.BrowsingData, DataCategoryEntries());
+                break;
         }
 
         RenderState();
     }
 
-    private async Task ClosePanelAsync()
+    /// <summary>
+    /// Reads the profile's cookies and lists them. The panel is not reopened when the user navigated
+    /// or switched panels while the profile was being read.
+    /// </summary>
+    private async Task ShowCookieEntriesAsync()
+    {
+        if (_panel is null || _dataManager is null) return;
+        var cookies = await _dataManager.GetCookiesAsync().ConfigureAwait(true);
+        if (!string.Equals(_panelMode, "cookies", StringComparison.Ordinal)) return;
+        _panel.ShowEntries(InternalPanelMode.Cookies, CookieEntries(cookies));
+    }
+
+    private Task ClosePanelAsync()
     {
         // The panel is an owned window that took the foreground when it opened. Windows does not
         // always hand the foreground back when an owned window closes, and never does after a modal
         // confirmation was shown in between, so the shell returns focus to the browser itself.
         _window.Activate();
 
-        var activeInternal = ActiveInternalRoute();
-        _panelMode = null;
-        _panelOwnedByTab = false;
-        _panel?.Close();
+        ClosePanel();
 
         // Keyboard focus returns to the page, as it was before the panel opened.
         _observedHost?.Focus();
 
-        // Leaving a browser-owned page with no history returns its tab to the new-tab page.
-        if (activeInternal is not null && _tabs?.ActiveTab is { } active && _runtime is not null)
-        {
-            await _runtime.ResetToNewTabAsync(active.Id);
-        }
-
         RenderState();
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Closes the open panel and forgets its mode, so the shell never reports a panel that is gone.
+    /// Navigating or switching tabs closes a toolbar view; closing it is not an error.
+    /// </summary>
+    private void ClosePanel()
+    {
+        _panelMode = null;
+        _panel?.Close();
     }
 
     private void SaveSettings(string searchTemplate, string language, BrowserThemeMode theme, BrowserStartupBehavior startupBehavior)
@@ -454,6 +477,44 @@ internal sealed partial class BrowserShell : IDisposable
         RefreshPanel();
     }
 
+    /// <summary>
+    /// Clears the browsing-data categories the user confirmed. Clearing cookies and clearing one
+    /// category reach the profile the same way; the outcome is reported through a notice, because
+    /// the panel can close while the clear is still running.
+    /// </summary>
+    private void ClearBrowsingData(BrowserBrowsingDataKind kinds)
+    {
+        if (_dataManager is null) return;
+        Observe(async () =>
+        {
+            var result = await _dataManager.ClearAsync(kinds).ConfigureAwait(true);
+            // The categories stay listed, but the cookies they cleared are gone: the panel is shown
+            // again so it reflects what the profile now holds.
+            if (result.IsComplete) RefreshPanel();
+            var notice = !result.IsComplete
+                ? "notice.operationFailed"
+                : kinds == BrowserBrowsingDataKind.Cookies
+                    ? "notice.cookiesCleared"
+                    : "notice.dataCleared";
+            SendNotice(notice, result.Detail);
+        });
+    }
+
+    /// <summary>
+    /// Deletes one cookie the user picked in the cookies panel. A single cookie goes without a
+    /// confirmation, like a bookmark or a history entry.
+    /// </summary>
+    private void RemoveCookie(BrowserCookie cookie)
+    {
+        if (_dataManager is null) return;
+        Observe(async () =>
+        {
+            var result = await _dataManager.RemoveCookieAsync(cookie).ConfigureAwait(true);
+            if (result.IsComplete) RefreshPanel();
+            else SendNotice("notice.operationFailed", result.Detail);
+        });
+    }
+
     private void RefreshPanel()
     {
         if (_panel is null || _panelMode is null) return;
@@ -470,13 +531,54 @@ internal sealed partial class BrowserShell : IDisposable
             .Select(item => new PanelEntry(item.Title, item.Url))
             .ToList() ?? new List<PanelEntry>();
 
-    /// <summary>The internal route the active tab is on, or null.</summary>
-    private string? ActiveInternalRoute()
+    private List<PanelEntry> CookieEntries(IReadOnlyList<BrowserCookie> cookies) =>
+        cookies
+            .Select(cookie => new PanelEntry(cookie.Name, CookieDetail(cookie), cookie))
+            .ToList();
+
+    /// <summary>The four browsing-data categories, in the order the panel lists them.</summary>
+    private List<PanelEntry> DataCategoryEntries() => new()
     {
-        if (_tabs?.ActiveTab is not { Url: { Length: > 0 } url }) return null;
-        return Uri.TryCreate(url, UriKind.Absolute, out var uri) && NavigationInputParser.IsInternalPage(uri)
-            ? uri.Host.ToLowerInvariant()
-            : null;
+        DataCategory(BrowserBrowsingDataKind.Cache),
+        DataCategory(BrowserBrowsingDataKind.SiteData),
+        DataCategory(BrowserBrowsingDataKind.ServiceWorkers),
+        DataCategory(BrowserBrowsingDataKind.Cookies),
+    };
+
+    private PanelEntry DataCategory(BrowserBrowsingDataKind kind) => new(
+        _localization.Get(CategoryTitleKey(kind)),
+        _localization.Get(CategoryDescriptionKey(kind)),
+        dataKind: kind);
+
+    private static string CategoryTitleKey(BrowserBrowsingDataKind kind) => kind switch
+    {
+        BrowserBrowsingDataKind.Cache => "data.category.cache",
+        BrowserBrowsingDataKind.SiteData => "data.category.siteData",
+        BrowserBrowsingDataKind.ServiceWorkers => "data.category.serviceWorkers",
+        _ => "data.category.cookies",
+    };
+
+    private static string CategoryDescriptionKey(BrowserBrowsingDataKind kind) => kind switch
+    {
+        BrowserBrowsingDataKind.Cache => "data.category.cacheDescription",
+        BrowserBrowsingDataKind.SiteData => "data.category.siteDataDescription",
+        BrowserBrowsingDataKind.ServiceWorkers => "data.category.serviceWorkersDescription",
+        _ => "data.category.cookiesDescription",
+    };
+
+    /// <summary>The second line of a cookie row: where it lives, when it ends, and how it is protected.</summary>
+    private string CookieDetail(BrowserCookie cookie)
+    {
+        var parts = new List<string> { cookie.Domain };
+        // The default path says nothing about a cookie, so it is shown only when a site chose one.
+        if (!string.Equals(cookie.Path, "/", StringComparison.Ordinal)) parts.Add(cookie.Path);
+        parts.Add(cookie.ExpiresUtc is { } expires
+            ? _localization.Format("cookies.expires", "date", expires.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
+            : _localization.Get("cookies.session"));
+        if (cookie.IsSecure) parts.Add(_localization.Get("cookies.secure"));
+        if (cookie.IsHttpOnly) parts.Add(_localization.Get("cookies.httpOnly"));
+        parts.Add(_localization.Format("cookies.sameSite", "value", cookie.SameSite.ToString()));
+        return string.Join(" • ", parts);
     }
 
     private IReadOnlyList<string> GetAddressSuggestions()
@@ -521,34 +623,11 @@ internal sealed partial class BrowserShell : IDisposable
             ? _localization.Get("app.name")
             : title + " - " + _localization.Get("app.name"));
 
-        // A browser-owned page is shown by the native panel; an empty tab shows the new-tab page.
-        var activeInternal = ActiveInternalRoute();
-        if (activeInternal is not null)
-        {
-            if (_panelMode != activeInternal || _panel is null || !_panel.IsOpen)
-            {
-                _panelMode = activeInternal;
-                _panelOwnedByTab = true;
-                ShowPanel(activeInternal);
-            }
-
-            _window.SetNewTabPage(false, active?.SessionKind == BrowserSessionKind.Private);
-        }
-        else
-        {
-            if (_panelMode is not null && _panelOwnedByTab)
-            {
-                _panelMode = null;
-                _panelOwnedByTab = false;
-                _panel?.Close();
-            }
-
-            // A tab that holds a URL shows the palette until its content host exists. Showing the
-            // new-tab page instead flashes the new-tab text on top of a page that is loading,
-            // which is most visible when a session is restored at startup.
-            _window.SetNewTabPage(host is null && string.IsNullOrWhiteSpace(active?.Url),
-                active?.SessionKind == BrowserSessionKind.Private);
-        }
+        // A tab that holds a URL shows the palette until its content host exists. Showing the
+        // new-tab page instead flashes the new-tab text on top of a page that is loading,
+        // which is most visible when a session is restored at startup.
+        _window.SetNewTabPage(host is null && string.IsNullOrWhiteSpace(active?.Url),
+            active?.SessionKind == BrowserSessionKind.Private);
 
         WriteSmokeState();
     }

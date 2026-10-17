@@ -6,7 +6,6 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using Brezza.App.Native;
 using Brezza.Core.Abstractions;
-using Brezza.Core.Navigation;
 using Brezza.Core.Tabs;
 
 namespace Brezza.App;
@@ -39,11 +38,13 @@ internal sealed class MainWindow : IDisposable
     public const int IdBookmarks = 1016;
     public const int IdSettings = 1017;
     public const int IdMenu = 1018;
+    public const int IdCookies = 1019;
     public const int IdNotice = 1020;
     public const int IdNoticeAction = 1021;
     public const int IdNoticeDismiss = 1022;
     public const int IdStartTitle = 1023;
     public const int IdStartSubtitle = 1024;
+    public const int IdBrowsingData = 1025;
     public const int IdTitleMinimize = 1031;
     public const int IdTitleMaximize = 1032;
     public const int IdTitleClose = 1033;
@@ -1042,18 +1043,45 @@ internal sealed class MainWindow : IDisposable
         // built, so a strip widened only after its items are laid out leaves those arrows behind —
         // hidden again at once, but already made, and they flash in the caption row. The window is
         // moved without redrawing and its region still clips it to the band, so the extra width is
-        // never painted; it exists only so the items fit while the control measures them.
+        // never painted; it exists only so the items fit while they change.
         MoveTabStrip(Math.Max(_tabStripWidth, tabWidth * count + count + slack), _tabScrollOffset);
         NativeMethods.SendMessage(_tabStrip, NativeMethods.TCM_SETITEMSIZE, IntPtr.Zero,
             new IntPtr(NativeMethods.MakeLong(tabWidth, tabHeight)));
+
+        // The control can hold a different count than the one asked for: UpdateTabs sizes the
+        // strip before it inserts or deletes its items. Whatever the control holds right now has
+        // to fit the window from this moment on, because the arrows are built the moment it does
+        // not — and they stay built, hidden or not, for the life of the control.
+        var heldCount = (int)NativeMethods.SendMessage(
+            _tabStrip, NativeMethods.TCM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero);
         // Ask the control where its items really end instead of guessing. The control indents the
         // first item and pads each one, so tabWidth * count falls short as tabs are added, and a
         // strip whose items overflow makes the control build its own system scroll arrows — the one
         // control the strip must never show. The last item's right edge is how far the items reach,
         // and the window's region clips it to the band anyway, so room the items do not use costs
         // nothing.
-        var lastItem = TabRect(count - 1);
-        _tabStripWidth = Math.Max(tabWidth * count + slack, lastItem.right + slack);
+        var heldEnd = heldCount > 0 ? TabRect(heldCount - 1).right : 0;
+        if (heldCount == count)
+        {
+            // The control already holds the requested count, so the measurement is the width the
+            // strip keeps: the real end of the items, and nothing wider.
+            _tabStripWidth = Math.Max(tabWidth * count + slack, heldEnd + slack);
+        }
+        else
+        {
+            // The items change under this window before it is sized again. Keep room for both the
+            // items the control holds now and the ones it is about to hold, at the new item size:
+            // narrowing now overflows whichever set is present and builds the system scroll arrows
+            // this design exists to avoid — a closed tab's old items on the way out, or a new
+            // tab's incoming ones on the way in. When the control holds the previous count, one
+            // more item past the measured end is exact; the estimate otherwise carries the
+            // control's own padding plus the slack. Layout re-sizes from the real item rectangle
+            // once the items are in place, in the same turn and before any paint.
+            var incomingEnd = heldCount == count - 1
+                ? heldEnd + tabWidth
+                : tabWidth * count + count + slack;
+            _tabStripWidth = Math.Max(heldEnd + slack, incomingEnd + slack);
+        }
         _tabStripScrollable = _tabStripWidth > available;
         _tabVisibleWidth = Math.Min(available, _tabStripWidth);
         _tabMaxScroll = Math.Max(0, _tabStripWidth - _tabVisibleWidth);
@@ -1501,13 +1529,6 @@ internal sealed class MainWindow : IDisposable
     {
         if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
         {
-            if (NavigationInputParser.IsInternalPage(uri))
-            {
-                if (uri.Host.Equals("settings", StringComparison.OrdinalIgnoreCase)) return _localization.Get("settings.title");
-                if (uri.Host.Equals("history", StringComparison.OrdinalIgnoreCase)) return _localization.Get("history.title");
-                return _localization.Get("bookmarks.title");
-            }
-
             if (!string.IsNullOrEmpty(uri.Host)) return uri.Host;
             if (uri.IsFile)
             {
@@ -1734,6 +1755,12 @@ internal sealed class MainWindow : IDisposable
             case IdBookmarks:
                 OpenPanelRequested?.Invoke(this, "bookmarks");
                 break;
+            case IdCookies:
+                OpenPanelRequested?.Invoke(this, "cookies");
+                break;
+            case IdBrowsingData:
+                OpenPanelRequested?.Invoke(this, "data");
+                break;
             case IdSettings:
                 OpenPanelRequested?.Invoke(this, "settings");
                 break;
@@ -1759,13 +1786,18 @@ internal sealed class MainWindow : IDisposable
     private void ShowMenu()
     {
         if (_menu.IsOpen) return;
-        var commands = new[] { IdNewTab, IdNewPrivateTab, IdHistory, IdBookmarks, IdSettings };
+        var commands = new[]
+        {
+            IdNewTab, IdNewPrivateTab, IdHistory, IdBookmarks, IdCookies, IdBrowsingData, IdSettings,
+        };
         var items = new[]
         {
             new FlatPopupItem(_localization.Get("tab.newAction"), "Ctrl+T"),
             new FlatPopupItem(_localization.Get("tab.newPrivateAction"), "Ctrl+Shift+N"),
             new FlatPopupItem(_localization.Get("toolbar.history"), "Ctrl+H", separatorBefore: true),
             new FlatPopupItem(_localization.Get("toolbar.bookmarks")),
+            new FlatPopupItem(_localization.Get("toolbar.cookies"), separatorBefore: true),
+            new FlatPopupItem(_localization.Get("toolbar.browsingData"), "Ctrl+Shift+Del"),
             new FlatPopupItem(_localization.Get("toolbar.settings"), separatorBefore: true),
         };
         NativeMethods.GetWindowRect(_menuButton, out var anchor);

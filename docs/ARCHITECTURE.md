@@ -10,7 +10,7 @@ flowchart TD
     Core["Brezza.Core<br/>browser state and policies"]
     WV["Brezza.WebView2<br/>WebView2 controllers in HWNDs"]
     Store["Brezza.Persistence<br/>local storage"]
-    Panel["Native panel dialog<br/>settings / history / bookmarks"]
+    Panel["Native panel dialog<br/>settings / history / bookmarks / cookies / data"]
     Engine["WebView2 Runtime<br/>untrusted page processes"]
     App --> Core
     App --> WV
@@ -28,8 +28,8 @@ flowchart TD
 | Project | Owns | Must not own |
 |---|---|---|
 | `Brezza.App` (`net48`) | Native window and controls, message loop, control layout and DPI, localization, native panel dialogs, composition root | WebView2 COM calls, browser state ownership, a second authoritative copy of browser state |
-| `Brezza.Core` (`netstandard2.0`) | Tab registry/runtime lifecycle, navigation parsing, search providers, sleep policy, cleanup, download naming, permission policy | Win32, WPF, WebView2 SDK, filesystem access |
-| `Brezza.WebView2` (`net48`) | Isolated environments, `CoreWebView2Controller` lifetime and event translation, private profiles and cleanup I/O | Search policy, tab ordering, persistence |
+| `Brezza.Core` (`netstandard2.0`) | Tab registry/runtime lifecycle, navigation parsing, search providers, sleep policy, cleanup, download naming, permission policy, browsing-data policy | Win32, WPF, WebView2 SDK, filesystem access |
+| `Brezza.WebView2` (`net48`) | Isolated environments, `CoreWebView2Controller` lifetime and event translation, private profiles, profile data access, and cleanup I/O | Search policy, tab ordering, persistence |
 | `Brezza.Persistence` (`netstandard2.0`) | Versioned settings, history, bookmark, and session stores | UI or WebView2 dependencies |
 | `Brezza.Core.Tests` | Deterministic tests of state transitions and policy | WebView2 Runtime behavior |
 
@@ -48,7 +48,7 @@ Allowed project references are `App → Core`, `App → WebView2`, `App → Pers
 | Tab strip | `SysTabControl32` | Tab icons and titles, selection, tooltips for long titles |
 | Close active tab | `BUTTON` | Closes the tab Core tracks as active |
 | New tab | `BUTTON` | Creates a normal tab |
-| Toolbar menu | `BUTTON` | Opens a menu with new tab, new private tab, history, bookmarks, and settings (Alt+F) |
+| Toolbar menu | `BUTTON` | Opens a menu with new tab, new private tab, history, bookmarks, cookies, browsing data, and settings (Alt+F) |
 | Back / forward / reload | `BUTTON` | History navigation |
 | Address and search | `COMBOBOX` (drop-down) | Raw input submission; drop-down lists history and open tabs |
 | Bookmark | `BUTTON` | Toggles a bookmark for the active page |
@@ -93,24 +93,42 @@ A scroll step moves the strip and clips its region without redrawing either, the
 
 ## Browser-Owned Views
 
-Settings, history, and bookmarks are native panels in one owned dialog (`BrezzaInternalPanel`) built from a combo box, an edit field, a list box, and buttons. The panel reports intent (save settings, open a URL, remove an entry, clear history) and renders the data it is given.
+Settings, history, bookmarks, cookies, and browsing data are native panels in one owned dialog
+(`BrezzaInternalPanel`) built from combo boxes, edit fields, a list box, and buttons. The panel
+reports intent (save settings, open a URL, remove an entry, remove a cookie, clear history, clear
+browsing data) and renders the data it is given.
 
-The canonical `brezza://settings`, `brezza://history`, and `brezza://bookmarks` URLs remain the logical tab URLs, so the address field and session records keep working:
+Every panel is a toolbar view with no browser URL of its own (ADR 0010). It is opened from the
+toolbar menu — history (Ctrl+H), bookmarks, cookies, browsing data (Ctrl+Shift+Delete), and
+settings — and closes when the user navigates, switches tabs, presses Escape, or uses the panel's
+own close action. No tab holds a panel, no tab URL names one, and no WebView2 surface is created for
+one. The `brezza` scheme is not navigable any more, so a `brezza://` address typed into the address
+field is searched like any other text.
 
-| Browser URL | Native view | Owner |
-|---|---|---|
-| `brezza://settings` | settings panel (search provider, language) | `Brezza.App` |
-| `brezza://history` | history panel (filter, open, remove, clear) | `Brezza.App` |
-| `brezza://bookmarks` | bookmarks panel (filter, open, remove) | `Brezza.App` |
+| Panel | Content | Row action | Footer action |
+|---|---|---|---|
+| Settings | search provider, language, theme, startup behavior | — | Save / Cancel |
+| History | visited pages (filter, open) | remove entry | Clear history |
+| Bookmarks | saved pages (filter, open) | remove entry | — |
+| Cookies | the profile's cookies (filter) | delete that cookie | Clear cookies |
+| Browsing data | the four data categories | clear that category | Clear all |
 
-A toolbar-opened panel is a window-level view state and closes when the user navigates or switches tabs. A tab whose URL is an internal route owns its panel; closing the panel returns that tab to the new-tab state (`TabRuntimeManager.ResetToNewTabAsync`) and entering the route releases its content host (`TabRuntimeManager.ReleaseHostAsync`), so a browser-owned page never holds a WebView2 surface.
+The cookies panel lists every cookie the normal profile stores: the name over where it lives, when
+it ends (or that it is a session cookie), and the flags the site set. The browsing-data panel lists
+cached files, website storage, service workers, and cookies, each with what it covers; it shows no
+size, because WebView2 exposes no per-category size and a measured profile folder is mostly runtime
+data that no clear touches.
+
+A per-row action that only removes one of the user's own entries runs without asking, like removing
+a bookmark. Anything that clears a category, clears all cookies, or clears history asks first, and
+every outcome is reported through a notice. All of them act on the normal profile only.
 
 ## State Ownership
 
 - `TabRegistry` is the source of truth for tab identity, ordering, and the active tab.
 - A tab model is durable browser state. A WebView2 host is a disposable runtime resource and is never stored in a view model. An empty URL is the lightweight new-tab state and has no content host until navigation begins.
 - `TabRuntimeManager` is the single owner of host creation, activation, sleep, and closure. It shares an in-flight host creation task per tab and closes late hosts after tab removal or shutdown.
-- Implemented lifecycle is `Dormant → Creating → Active`, with `Sleeping`, failure, and closing paths. Empty-url and internal-route tabs are rendered by the native shell; inactive hosts are eligible for bounded sleep.
+- Implemented lifecycle is `Dormant → Creating → Active`, with `Sleeping`, failure, and closing paths. Empty-url tabs are rendered by the native shell; inactive hosts are eligible for bounded sleep.
 - Sleep requires eligibility: `TabSleepPolicy` releases an inactive host only when it is not loading, not playing audio, and not showing a full-screen element. The sweep keeps the eight-host budget and ten-minute inactivity threshold, and skips ineligible candidates. Reactivation reloads the saved URL; DOM and form state are not preserved when a host is released.
 - App views render snapshots and send commands through app use cases. They do not mutate core collections or call WebView2 directly.
 
@@ -125,7 +143,7 @@ The native shell reads `BrowserUi/locales/en.json` or `BrowserUi/locales/zh-Hans
 ## Trust Boundaries
 
 - Remote pages are untrusted. A content host starts with the message bridge disabled and never registers a message handler, so no page can address the browser even though the page messaging object exists in the document. There is no browser-owned HTTP origin: the `brezza.local` virtual-host mapping is gone, so a page that tries to read browser assets or navigate into a browser-owned page gets an ordinary network failure.
-- Only the browser opens its own views. Internal routes are resolved by the shell from the tab's logical URL; a remote document cannot navigate the shell into one, and no browser-owned document is ever served to a page.
+- Only the browser opens its own views, and they are toolbar views rather than routes: a remote document cannot navigate the shell into a panel, no browser-owned document is ever served to a page, and the `brezza` scheme is not navigable, so a page that tries to reach one gets an ordinary network failure or a search.
 - WebView2 process failure is reported by the adapter; automated process recovery is not implemented yet.
 - Normal tabs share `%LOCALAPPDATA%\Brezza\WebView2`. Private tabs share a separate per-window `PrivateSessions/{guid}` profile created with WebView2 private mode. The last private tab closes its controllers before the profile directory is removed; application shutdown also closes and cleans the private profile.
 
@@ -145,7 +163,9 @@ Downloads, popups, and permission requests are decided by Core and translated by
 
 ## Persistence
 
-`SettingsStore`, `HistoryStore`, `BookmarkStore`, and `SessionStore` write schema-versioned XML through a temporary file and atomic replacement; corrupt or unsupported files fall back to safe defaults. Settings schema version 2 adds a `theme` value (`System`, `Light`, or `Dark`), schema version 3 adds a `startupBehavior` value (`NewTab` or `RestoreSession`), and files of either older schema load with the new-tab default. History is recorded after successful normal HTTP/HTTPS navigation and flushed at shutdown. Private tabs are excluded from history and saved sessions. Session restore preserves normal tab identity, order, duplicate URLs, and the active tab; legacy `brezza://newtab` records migrate to the empty new-tab URL, and the store accepts previously opened HTTP/HTTPS, internal, and local file URLs. The session is saved at every shutdown, but `BrowserShell` only loads it when the stored `startupBehavior` asks for it, so the default start is one new-tab page. The default root is `%LOCALAPPDATA%\Brezza` (ADR 0006).
+`SettingsStore`, `HistoryStore`, `BookmarkStore`, and `SessionStore` write schema-versioned XML through a temporary file and atomic replacement; corrupt or unsupported files fall back to safe defaults. Settings schema version 2 adds a `theme` value (`System`, `Light`, or `Dark`), schema version 3 adds a `startupBehavior` value (`NewTab` or `RestoreSession`), and files of either older schema load with the new-tab default. History is recorded after successful normal HTTP/HTTPS navigation and flushed at shutdown. Private tabs are excluded from history and saved sessions. Session restore preserves normal tab identity, order, duplicate URLs, and the active tab; a tab saved on a browser-owned page reopens as an empty new-tab page, and the store accepts previously opened HTTP/HTTPS and local file URLs. The session is saved at every shutdown, but `BrowserShell` only loads it when the stored `startupBehavior` asks for it, so the default start is one new-tab page. The default root is `%LOCALAPPDATA%\Brezza` (ADR 0006).
+
+Cookies and the data sites store are profile data owned by WebView2, not XML stores. Core defines the contract (`IBrowserDataManager` with `GetCookiesAsync`, `RemoveCookieAsync`, `ClearAsync(BrowserBrowsingDataKind)`, `BrowserCookie`, and an observable `BrowsingDataClearResult`) and the adapter implements it against the normal profile's cookie manager and clear-browsing-data API, so the shell reads and clears profile data without touching a WebView2 object. Core owns which categories exist (`Cache`, `SiteData`, `ServiceWorkers`, `Cookies`, and their sum `All`); the adapter maps them onto the runtime's data kinds, so a clear never removes more than the panel showed. Every clear returns an observable result and is reported; a task that clears profile data is never discarded silently. A single deletion is applied by the runtime after the call returns, so the adapter reads the store back until the cookie is gone before it reports success. The adapter reaches the profile through a hidden management controller that is never visible and never navigates, so the data tools work while no tab holds a content host.
 
 ## Release
 
@@ -153,6 +173,6 @@ Downloads, popups, and permission requests are decided by Core and translated by
 
 ## Verification
 
-Core tests cover URL/search classification, provider presets, persistence recovery, sleep eligibility, host release, observable session cleanup with retry, concurrent activation, private-session cleanup triggering, close-during-create, and shutdown-during-create. `tools/windows-smoke/smoke.ps1` drives the real native controls in a Debug build and covers the new-tab page, native panels for settings/history/bookmarks, page navigation, internal routes as native panels, the remote-content boundary (no bridge, no browser assets, no browser-owned page), normal/private tab operations through the native tab strip, private-profile cleanup, failure feedback, and session restore across a second process once the startup setting asks for it, with the default start staying on the new-tab page. `tools/package.ps1` publishes an x64 framework-dependent bundle with the managed assemblies merged into one executable and smoke-tests it with the installed WebView2 Runtime.
+Core tests cover URL/search classification, provider presets, persistence recovery, sleep eligibility, host release, observable session cleanup with retry, concurrent activation, private-session cleanup triggering, close-during-create, and shutdown-during-create. `tools/smoke.ps1` drives the real native controls in a Debug build and covers the new-tab page, native panels for settings/history/bookmarks/cookies/browsing data, page navigation, a `brezza://` address being searched instead of opening a panel, the cookies panel's list/filter/row-delete/clear-all through the real controls, the browsing-data panel's category and clear-all actions through the menu command and Ctrl+Shift+Delete, the remote-content boundary (no bridge, no browser assets, no browser-owned page), normal/private tab operations through the native tab strip, private-profile cleanup, failure feedback, and session restore across a second process once the startup setting asks for it, with the default start staying on the new-tab page. The harness serves a local HTTP origin that plants the cookies the panel is driven against and acts as the search provider, so the run stays off the public network. `tools/package.ps1` publishes an x64 framework-dependent bundle with the managed assemblies merged into one executable and smoke-tests it with the installed WebView2 Runtime. The driver is compiled into Debug builds under `#if DEBUG` and split into `BrowserShell.Smoke*.cs` partial files by concern.
 
-GitHub Actions runs two workflows: `ci.yml` restores, builds Release, and runs the Core tests on pushes and pull requests to `main`, uploading the TRX results; `release.yml` runs on a `v*` tag push (or a manual run naming a tag), builds and tests, packages with the merge, and publishes a GitHub Release whose pre-release flag follows a suffix in the tag. The Windows smoke and the package launch check need an interactive desktop and the WebView2 Runtime, so neither runs in CI.
+GitHub Actions runs two workflows: `ci.yml` restores, builds Release, and runs the Core tests through `tools/test.ps1 -Stage Unit` on pushes and pull requests to `main`, uploading the TRX results; `release.yml` runs on a `v*` tag push (or a manual run naming a tag), builds and tests the same way, packages with the merge, and publishes a GitHub Release whose pre-release flag follows a suffix in the tag. The Windows smoke and the package launch check need an interactive desktop and the WebView2 Runtime, so neither runs in CI.

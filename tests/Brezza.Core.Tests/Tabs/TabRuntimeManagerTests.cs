@@ -60,38 +60,6 @@ public sealed class TabRuntimeManagerTests
     }
 
     [Fact]
-    public async Task Releasing_a_host_keeps_the_tab_but_removes_its_surface()
-    {
-        var registry = new TabRegistry();
-        var tab = registry.Create("https://example.com/");
-        var factory = new DelayedFactory();
-        var manager = new TabRuntimeManager(registry, factory);
-
-        var activating = manager.ActivateAsync(tab.Id);
-        var host = factory.Complete();
-        await activating;
-
-        await manager.ReleaseHostAsync(tab.Id);
-
-        Assert.True(host.IsDisposed);
-        Assert.Null(manager.ActiveHost);
-        Assert.True(registry.Contains(tab.Id));
-        Assert.Equal("https://example.com/", tab.Url);
-        Assert.Equal(TabRuntimeState.Active, tab.State);
-    }
-
-    [Fact]
-    public async Task Releasing_an_unknown_tab_is_a_no_op()
-    {
-        var registry = new TabRegistry();
-        var manager = new TabRuntimeManager(registry, new DelayedFactory());
-
-        await manager.ReleaseHostAsync("tab-404");
-
-        Assert.Empty(registry.Tabs);
-        Assert.Null(manager.ActiveHost);
-    }
-    [Fact]
     public async Task Closing_during_creation_closes_the_new_host_and_removes_it()    {
         var registry = new TabRegistry();
         var tab = registry.Create("https://example.com/");

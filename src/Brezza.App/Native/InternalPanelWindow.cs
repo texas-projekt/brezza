@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using Brezza.App.Native;
 using Brezza.Core.Navigation;
+using Brezza.Core.Privacy;
 using Brezza.Persistence;
 
 namespace Brezza.App;
@@ -14,20 +15,33 @@ internal enum InternalPanelMode
     Settings,
     History,
     Bookmarks,
+    Cookies,
+    BrowsingData,
 }
 
-/// <summary>One row of the history or bookmarks panel.</summary>
-internal readonly struct PanelEntry
+/// <summary>
+/// One row of the history, bookmarks, cookies, or browsing-data panel. A row carries what it acts
+/// on: a page to open, a cookie to delete, or a category of browsing data to clear.
+/// </summary>
+internal sealed class PanelEntry
 {
-    public PanelEntry(string title, string url)
+    public PanelEntry(string title, string url, BrowserCookie? cookie = null, BrowserBrowsingDataKind? dataKind = null)
     {
         Title = title;
         Url = url;
+        Cookie = cookie;
+        DataKind = dataKind;
     }
 
     public string Title { get; }
 
     public string Url { get; }
+
+    /// <summary>The cookie this row manages, for the cookies panel.</summary>
+    public BrowserCookie? Cookie { get; }
+
+    /// <summary>The browsing-data category this row clears, for the browsing-data panel.</summary>
+    public BrowserBrowsingDataKind? DataKind { get; }
 }
 
 /// <summary>Settings the user submitted from the native settings panel.</summary>
@@ -51,15 +65,17 @@ internal readonly struct SettingsSubmission
 }
 
 /// <summary>
-/// The native panel that replaces the former HTML internal pages. Settings, history, and
-/// bookmarks are ordinary Win32 controls in one dialog owned by the browser window; the panel
-/// reports user intent and renders the data it is given.
+/// The native panels that replace the former HTML internal pages. Settings, history, bookmarks,
+/// cookies, and browsing data are ordinary Win32 controls in one dialog owned by the browser
+/// window; the panel reports user intent and renders the data it is given. Every mode is a toolbar
+/// view without a browser URL of its own.
 /// </summary>
 /// <remarks>
 /// Layout: a heading and subtitle, then either a label/field form with a Save/Cancel footer
-/// (settings) or a search field over a two-line list (history, bookmarks). List rows act on
-/// themselves: a click opens the page, the row's remove button (or Delete) removes it, and Enter
-/// opens the selected row. Escape closes the panel; in settings it also discards unsaved changes.
+/// (settings) or a search field over a two-line list (history, bookmarks, cookies). List rows act
+/// on themselves: a click opens the page, the row's remove button (or Delete) removes it, and Enter
+/// opens the selected row. The browsing-data panel is a list of the four data categories with a
+/// Clear all footer. Escape closes the panel; in settings it also discards unsaved changes.
 /// </remarks>
 internal sealed class InternalPanelWindow : IDisposable
 {
@@ -154,18 +170,36 @@ internal sealed class InternalPanelWindow : IDisposable
     public event EventHandler<SettingsSubmission>? SaveSettingsRequested;
     public event EventHandler<string>? OpenUrlRequested;
     public event EventHandler<string>? RemoveEntryRequested;
+    public event EventHandler<BrowserCookie>? RemoveCookieRequested;
     public event EventHandler? ClearHistoryRequested;
+    public event EventHandler<BrowserBrowsingDataKind>? ClearBrowsingDataRequested;
     public event EventHandler? CloseRequested;
 
     public bool IsOpen => _hwnd != IntPtr.Zero;
 
     private bool IsSettings => _mode == InternalPanelMode.Settings;
 
+    private bool IsCookies => _mode == InternalPanelMode.Cookies;
+
+    private bool IsBrowsingData => _mode == InternalPanelMode.BrowsingData;
+
+    /// <summary>A panel that shows a list of entries: history, bookmarks, or cookies.</summary>
+    private bool IsList => !IsSettings && !IsBrowsingData;
+
+    /// <summary>
+    /// A panel whose rows have no page to open: cookies and browsing data act on themselves, so a
+    /// click or Enter on a row does nothing and only the row's own button runs.
+    /// </summary>
+    private bool IsSelfActing => IsCookies || IsBrowsingData;
+
     private IntPtr[] SettingsControls => new[]
     {
         _presetLabel, _presetCombo, _templateLabel, _templateEdit, _languageLabel, _languageCombo,
-        _themeLabel, _themeCombo, _startupLabel, _startupCombo, _statusText, _saveButton, _cancelButton,
+        _themeLabel, _themeCombo, _startupLabel, _startupCombo,
     };
+
+    /// <summary>Controls both form modes share: the status line and the footer buttons.</summary>
+    private IntPtr[] FormControls => new[] { _statusText, _saveButton, _cancelButton };
 
     private IntPtr[] ListControls => new[] { _filterEdit, _listView, _emptyText };
 
@@ -239,12 +273,15 @@ internal sealed class InternalPanelWindow : IDisposable
     {
         if (_hwnd == IntPtr.Zero) return;
         var history = _mode == InternalPanelMode.History;
+        var cookies = IsCookies;
         NativeMethods.SetWindowText(_hwnd, _localization.Get(TitleKey()));
         NativeMethods.SetWindowText(_titleText, _localization.Get(TitleKey()));
         NativeMethods.SetWindowText(_subtitleText, _localization.Get(_mode switch
         {
             InternalPanelMode.Settings => "settings.subtitle",
             InternalPanelMode.History => "history.subtitle",
+            InternalPanelMode.Cookies => "cookies.subtitle",
+            InternalPanelMode.BrowsingData => "data.subtitle",
             _ => "bookmarks.subtitle",
         }));
         NativeMethods.SetWindowText(_presetLabel, _localization.Get("settings.searchProvider"));
@@ -253,11 +290,15 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.SetWindowText(_themeLabel, _localization.Get("settings.theme"));
         NativeMethods.SetWindowText(_startupLabel, _localization.Get("settings.startup"));
         NativeMethods.SendMessage(_filterEdit, 0x1501 /* EM_SETCUEBANNER */, new IntPtr(1),
-            _localization.Get(history ? "history.search" : "bookmarks.search"));
-        NativeMethods.SetWindowText(_emptyText, _localization.Get(history ? "history.empty" : "bookmarks.empty"));
-        NativeMethods.SetWindowText(_clearButton, _localization.Get("history.clear"));
-        NativeMethods.SetWindowText(_saveButton, _localization.Get("settings.save"));
-        NativeMethods.SetWindowText(_cancelButton, _localization.Get("settings.cancel"));
+            _localization.Get(cookies ? "cookies.search" : history ? "history.search" : "bookmarks.search"));
+        NativeMethods.SetWindowText(_emptyText,
+            _localization.Get(cookies ? "cookies.empty" : history ? "history.empty" : "bookmarks.empty"));
+        NativeMethods.SetWindowText(_clearButton, _localization.Get(cookies ? "cookies.clear" : "history.clear"));
+        // In browsing-data mode the footer's primary action clears every category and Cancel closes.
+        NativeMethods.SetWindowText(_saveButton,
+            _localization.Get(IsBrowsingData ? "data.clearAll" : "settings.save"));
+        NativeMethods.SetWindowText(_cancelButton,
+            _localization.Get(IsBrowsingData ? "settings.close" : "settings.cancel"));
         NativeMethods.SetWindowText(_statusText, _statusKey is null ? string.Empty : _localization.Get(_statusKey));
 
         RebuildPresetList();
@@ -417,7 +458,10 @@ internal sealed class InternalPanelWindow : IDisposable
                 ConfirmClear();
                 break;
             case IdSave:
-                SaveSettings();
+                // The footer's primary action is a settings save in one mode and a clear of every
+                // browsing-data category in the other; both are the panel's own explicit action.
+                if (IsBrowsingData) ConfirmClearAll();
+                else SaveSettings();
                 break;
             case IdCancel:
                 CancelAndClose();
@@ -441,6 +485,10 @@ internal sealed class InternalPanelWindow : IDisposable
             return;
         }
 
+        // Enter never clears browsing data or removes a cookie: the panel's own buttons run those,
+        // so a stray keypress cannot change the profile.
+        if (IsSelfActing) return;
+
         // Enter opens the selected row, or the first match while typing in the search field.
         var index = SelectedIndex();
         if (index < 0 && _visible.Count > 0) index = 0;
@@ -459,13 +507,15 @@ internal sealed class InternalPanelWindow : IDisposable
             NativePaint.Fill(dc, client, palette.Surface, _theme);
 
             // The list sits inside a flat field frame painted here; edits and combos draw their own.
-            if (!IsSettings)
+            if (IsList || IsBrowsingData)
             {
                 var frame = ListFrame();
                 NativePaint.FillRounded(dc, frame, Scale(NativeMetrics.RadiusControl), palette.Field, _theme);
                 NativePaint.FrameRounded(dc, frame, Scale(NativeMetrics.RadiusControl), palette.Border, _theme);
             }
-            else
+
+            // A form mode has a footer: the line above it separates the actions from the content.
+            if (!IsList)
             {
                 NativePaint.Fill(dc, NativePaint.Rect(0, client.Height - Scale(FooterHeight), client.Width, 1), palette.Border, _theme);
             }
@@ -592,6 +642,7 @@ internal sealed class InternalPanelWindow : IDisposable
 
     private IEnumerable<IntPtr> AllControls() => new[] { _titleText, _subtitleText, _clearButton }
         .Concat(SettingsControls)
+        .Concat(FormControls)
         .Concat(ListControls);
 
     private void ApplyFonts()
@@ -808,7 +859,14 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.SetWindowText(_statusText, key is null ? string.Empty : _localization.Get(key));
     }
 
-    // ---------- History and bookmarks ----------
+    /// <summary>Shows status text that is not a localized key, such as a failure with its detail.</summary>
+    private void SetStatusText(string? text)
+    {
+        _statusKey = null;
+        NativeMethods.SetWindowText(_statusText, text ?? string.Empty);
+    }
+
+    // ---------- History, bookmarks, and cookies ----------
 
     private void RebuildList()
     {
@@ -830,8 +888,13 @@ internal sealed class InternalPanelWindow : IDisposable
         }
 
         var history = _mode == InternalPanelMode.History;
-        NativeMethods.SetWindowText(_emptyText, _localization.Get(
-            _entries.Count > 0 ? "list.noMatches" : history ? "history.empty" : "bookmarks.empty"));
+        NativeMethods.SetWindowText(_emptyText, _localization.Get(_entries.Count > 0
+            ? "list.noMatches"
+            : IsCookies
+                ? "cookies.empty"
+                : history
+                    ? "history.empty"
+                    : "bookmarks.empty"));
         var empty = _visible.Count == 0;
         NativeMethods.ShowWindow(_emptyText, empty ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
         NativeMethods.ShowWindow(_listView, empty ? NativeMethods.SW_HIDE : NativeMethods.SW_SHOW);
@@ -905,7 +968,8 @@ internal sealed class InternalPanelWindow : IDisposable
     private void UpdateListActions()
     {
         if (_clearButton == IntPtr.Zero) return;
-        NativeMethods.EnableWindow(_clearButton, _entries.Count > 0 && _mode == InternalPanelMode.History);
+        NativeMethods.EnableWindow(_clearButton,
+            _entries.Count > 0 && _mode is InternalPanelMode.History or InternalPanelMode.Cookies);
     }
 
     private int SelectedIndex() =>
@@ -914,13 +978,30 @@ internal sealed class InternalPanelWindow : IDisposable
     private void Open(int index)
     {
         if (index < 0 || index >= _visible.Count) return;
+        // A cookie or a data category has no page to open; its row button is the only action.
+        if (IsSelfActing) return;
         OpenUrlRequested?.Invoke(this, _visible[index].Url);
     }
 
     private void Remove(int index)
     {
         if (index < 0 || index >= _visible.Count) return;
-        RemoveEntryRequested?.Invoke(this, _visible[index].Url);
+        var entry = _visible[index];
+        if (IsCookies)
+        {
+            // A single cookie goes without a confirmation, like a bookmark or a history entry.
+            if (entry.Cookie is { } cookie) RemoveCookieRequested?.Invoke(this, cookie);
+            return;
+        }
+
+        if (IsBrowsingData)
+        {
+            // Clearing a category removes site data, so it asks first, like clearing history does.
+            if (entry.DataKind is { } kind) ConfirmClearCategory(kind);
+            return;
+        }
+
+        RemoveEntryRequested?.Invoke(this, entry.Url);
     }
 
     /// <summary>The remove button inside the right edge of a list row, in list-box coordinates.</summary>
@@ -1021,15 +1102,55 @@ internal sealed class InternalPanelWindow : IDisposable
 
     private void ConfirmClear()
     {
-        if (_mode != InternalPanelMode.History || _entries.Count == 0) return;
+        if (_entries.Count == 0) return;
+        if (_mode == InternalPanelMode.History)
+        {
+            if (Confirm("history.clearConfirm", "history.clear")) ClearHistoryRequested?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        if (IsCookies && Confirm("cookies.clearConfirm", "cookies.clear"))
+        {
+            ClearBrowsingDataRequested?.Invoke(this, BrowserBrowsingDataKind.Cookies);
+        }
+    }
+
+    /// <summary>Asks before one category of browsing data is cleared, naming that category.</summary>
+    private void ConfirmClearCategory(BrowserBrowsingDataKind kind)
+    {
+        if (Confirm("data.clearCategoryConfirm", CategoryTitleKey(kind)))
+        {
+            ClearBrowsingDataRequested?.Invoke(this, kind);
+        }
+    }
+
+    private void ConfirmClearAll()
+    {
+        if (Confirm("data.clearAllConfirm", "data.clearAll"))
+        {
+            ClearBrowsingDataRequested?.Invoke(this, BrowserBrowsingDataKind.All);
+        }
+    }
+
+    /// <summary>Asks a yes/no question; true when the user confirmed.</summary>
+    private bool Confirm(string messageKey, string titleKey)
+    {
         var answer = NativeMethods.MessageBox(
             _hwnd,
-            _localization.Get("history.clearConfirm"),
-            _localization.Get("history.clear"),
+            _localization.Get(messageKey),
+            _localization.Get(titleKey),
             NativeMethods.MB_YESNO | NativeMethods.MB_ICONQUESTION);
-        if (answer != NativeMethods.IDYES) return;
-        ClearHistoryRequested?.Invoke(this, EventArgs.Empty);
+        return answer == NativeMethods.IDYES;
     }
+
+    /// <summary>The localized name of a browsing-data category, used as a confirmation's title.</summary>
+    private string CategoryTitleKey(BrowserBrowsingDataKind kind) => kind switch
+    {
+        BrowserBrowsingDataKind.Cache => "data.category.cache",
+        BrowserBrowsingDataKind.SiteData => "data.category.siteData",
+        BrowserBrowsingDataKind.ServiceWorkers => "data.category.serviceWorkers",
+        _ => "data.category.cookies",
+    };
 
     // ---------- Mode and layout ----------
 
@@ -1037,6 +1158,8 @@ internal sealed class InternalPanelWindow : IDisposable
     {
         InternalPanelMode.Settings => "settings.title",
         InternalPanelMode.History => "history.title",
+        InternalPanelMode.Cookies => "cookies.title",
+        InternalPanelMode.BrowsingData => "data.title",
         _ => "bookmarks.title",
     };
 
@@ -1044,10 +1167,15 @@ internal sealed class InternalPanelWindow : IDisposable
     {
         foreach (var control in SettingsControls)
             NativeMethods.ShowWindow(control, IsSettings ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
-        foreach (var control in ListControls)
-            NativeMethods.ShowWindow(control, IsSettings ? NativeMethods.SW_HIDE : NativeMethods.SW_SHOW);
+        foreach (var control in FormControls)
+            NativeMethods.ShowWindow(control, IsSettings || IsBrowsingData ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
+        // The browsing-data panel is a list of fixed categories, so it shows the list without the
+        // search field that filters an entry list.
+        foreach (var control in new[] { _listView, _emptyText })
+            NativeMethods.ShowWindow(control, IsList || IsBrowsingData ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
+        NativeMethods.ShowWindow(_filterEdit, IsList ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
         NativeMethods.ShowWindow(_clearButton,
-            _mode == InternalPanelMode.History ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
+            _mode is InternalPanelMode.History or InternalPanelMode.Cookies ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
         Layout();
         NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
     }
@@ -1079,8 +1207,8 @@ internal sealed class InternalPanelWindow : IDisposable
 
         var footerTop = client.Height - Scale(FooterHeight);
         if (IsSettings) LayoutSettings(margin, y, width, bodyHeight);
-        else LayoutList(margin, y, width, client.Height - margin);
-        if (IsSettings) LayoutFooter(client.Width, footerTop);
+        else LayoutList(margin, y, width, IsBrowsingData ? footerTop : client.Height - margin);
+        if (IsSettings || IsBrowsingData) LayoutFooter(client.Width, footerTop);
         UpdateListActions();
     }
 
@@ -1093,8 +1221,7 @@ internal sealed class InternalPanelWindow : IDisposable
             (_languageLabel, _languageCombo), (_themeLabel, _themeCombo),
             (_startupLabel, _startupCombo),
         };
-        var labelWidth = rows.Max(row => NativeFonts.Measure(_hwnd, _fonts.Body, NativeMethods.GetWindowText(row.Item1)).x);
-        labelWidth = Math.Min(labelWidth + Scale(16), width / 2);
+        var labelWidth = MeasureLabelColumn(rows, width);
         var fieldLeft = left + labelWidth;
         var fieldWidth = width - labelWidth;
         var y = top;
@@ -1108,12 +1235,19 @@ internal sealed class InternalPanelWindow : IDisposable
         NativeMethods.MoveWindow(_statusText, fieldLeft, y, fieldWidth, bodyHeight, true);
     }
 
+    /// <summary>Width of a form's label column: its longest localized label, capped at half the form.</summary>
+    private int MeasureLabelColumn((IntPtr Label, IntPtr Field)[] rows, int width)
+    {
+        var labelWidth = rows.Max(row => NativeFonts.Measure(_hwnd, _fonts.Body, NativeMethods.GetWindowText(row.Label)).x);
+        return Math.Min(labelWidth + Scale(16), width / 2);
+    }
+
     private void LayoutList(int left, int top, int width, int bottom)
     {
-        // Clearing history is a list-level action, so it sits beside the search field instead of
-        // among the row actions.
+        // Clearing a whole list is a list-level action, so it sits beside the search field instead
+        // of among the row actions.
         var searchWidth = width;
-        if (_mode == InternalPanelMode.History)
+        if (_mode is InternalPanelMode.History or InternalPanelMode.Cookies)
         {
             var clearWidth = TextButtonWidth(_clearButton);
             searchWidth = width - clearWidth - Scale(NativeMetrics.SpaceSmall);

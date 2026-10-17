@@ -23,11 +23,6 @@ public sealed class NavigationInputParser
 
         if (Uri.TryCreate(text, UriKind.Absolute, out var absolute) && IsNavigableScheme(absolute.Scheme))
         {
-            if (string.Equals(absolute.Scheme, "brezza", StringComparison.OrdinalIgnoreCase) &&
-                !IsInternalPage(absolute))
-            {
-                return NavigationTarget.Search(text, new Uri(_searchTemplate.Replace(QueryPlaceholder, Uri.EscapeDataString(text)), UriKind.Absolute));
-            }
             return NavigationTarget.Url(text, absolute);
         }
 
@@ -69,21 +64,7 @@ public sealed class NavigationInputParser
     private static bool IsNavigableScheme(string scheme) =>
         string.Equals(scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
         string.Equals(scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(scheme, Uri.UriSchemeFile, StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(scheme, "brezza", StringComparison.OrdinalIgnoreCase);
-
-    public static bool IsInternalPage(Uri uri) =>
-        uri is not null &&
-        string.Equals(uri.Scheme, "brezza", StringComparison.OrdinalIgnoreCase) &&
-        (string.Equals(uri.Host, "settings", StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(uri.Host, "history", StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(uri.Host, "bookmarks", StringComparison.OrdinalIgnoreCase));
-
-    public static string GetCanonicalInternalUrl(Uri uri)
-    {
-        if (!IsInternalPage(uri)) throw new ArgumentException("The URI is not a supported internal page.", nameof(uri));
-        return "brezza://" + uri.Host.ToLowerInvariant();
-    }
+        string.Equals(scheme, Uri.UriSchemeFile, StringComparison.OrdinalIgnoreCase);
 
     private static bool LooksLikeHost(string text)
     {

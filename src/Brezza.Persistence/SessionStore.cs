@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Xml.Serialization;
-using Brezza.Core.Navigation;
 using Brezza.Core.Tabs;
 
 namespace Brezza.Persistence;
@@ -30,7 +29,13 @@ public sealed class SessionStore
             .Where(tab => !string.IsNullOrWhiteSpace(tab.Id) && ids.Add(tab.Id) && IsRestorableUrl(tab.Url))
             .Select(tab =>
             {
-                if (string.Equals(tab.Url, "brezza://newtab", StringComparison.OrdinalIgnoreCase)) tab.Url = string.Empty;
+                // Browser-owned pages are toolbar views now, so a tab saved on one reopens as a new tab.
+                if (!string.IsNullOrEmpty(tab.Url) &&
+                    tab.Url.StartsWith("brezza://", StringComparison.OrdinalIgnoreCase))
+                {
+                    tab.Url = string.Empty;
+                }
+
                 return tab;
             })
             .ToList();
@@ -59,10 +64,11 @@ public sealed class SessionStore
     private static bool IsRestorableUrl(string url) =>
         string.IsNullOrWhiteSpace(url) ||
         (Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
-         (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeFile ||
-          NavigationInputParser.IsInternalPage(uri) ||
-          (string.Equals(uri.Scheme, "brezza", StringComparison.OrdinalIgnoreCase) &&
-           string.Equals(uri.Host, "newtab", StringComparison.OrdinalIgnoreCase))));
+         (uri.Scheme == Uri.UriSchemeHttp ||
+          uri.Scheme == Uri.UriSchemeHttps ||
+          uri.Scheme == Uri.UriSchemeFile ||
+          // A tab saved on a browser-owned page reopens as a new tab; Load resets its URL.
+          string.Equals(uri.Scheme, "brezza", StringComparison.OrdinalIgnoreCase)));
 
     [XmlRoot("session")]
     public sealed class BrowserSession
