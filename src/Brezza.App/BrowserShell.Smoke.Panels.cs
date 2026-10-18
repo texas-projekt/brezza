@@ -33,17 +33,31 @@ internal sealed partial class BrowserShell
     /// application opened earlier in the z-order would otherwise hide the browser's own from this
     /// search for the whole wait.
     /// </summary>
+    /// <summary>
+    /// The modal dialog this browser process owns, or zero when there is none. Other applications
+    /// can show dialogs of the same class, so every dialog of the class is walked until one of them
+    /// belongs to this process: FindWindowEx hands back only the first match, and a dialog another
+    /// application opened earlier in the z-order would otherwise hide the browser's own from this
+    /// search.
+    /// </summary>
+    private IntPtr FindOwnedDialog()
+    {
+        var current = IntPtr.Zero;
+        while ((current = NativeMethods.FindWindowEx(IntPtr.Zero, current, "#32770", null)) != IntPtr.Zero)
+        {
+            if (NativeMethods.IsOwnedByProcess(current, _window.Handle)) return current;
+        }
+
+        return IntPtr.Zero;
+    }
+
     private async Task<IntPtr> WaitForOwnedDialogAsync(TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
-            var current = IntPtr.Zero;
-            while ((current = NativeMethods.FindWindowEx(IntPtr.Zero, current, "#32770", null)) != IntPtr.Zero)
-            {
-                if (NativeMethods.IsOwnedByProcess(current, _window.Handle)) return current;
-            }
-
+            var owned = FindOwnedDialog();
+            if (owned != IntPtr.Zero) return owned;
             await Task.Delay(50);
         }
 

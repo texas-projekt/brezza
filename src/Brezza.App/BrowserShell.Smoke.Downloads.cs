@@ -201,6 +201,77 @@ internal sealed partial class BrowserShell
         }
     }
 
+    /// <summary>
+    /// Drives the settings panel's downloads-folder picker. The dialog is modal on the shell's own
+    /// thread, so a pool timer accepts it while that thread sits inside the dialog's message loop.
+    /// A picker that cannot be shown is a failure: the browser used to fault on the way into it,
+    /// which took the whole browser down.
+    /// </summary>
+    private async Task AssertDownloadFolderPickerAsync()
+    {
+        await OpenPanelAndWaitAsync("settings");
+        var panel = await FindPanelWindowAsync();
+        var browse = NativeMethods.GetDlgItem(panel, InternalPanelWindow.IdDownloadFolderBrowse);
+        if (browse == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("The settings panel has no downloads-folder browse button.");
+        }
+
+        var folderField = NativeMethods.GetDlgItem(panel, InternalPanelWindow.IdDownloadFolder);
+        if (folderField == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("The settings panel has no downloads-folder field.");
+        }
+
+        // The dialog is modal on this thread, so a pool timer accepts it from another thread.
+        // The wait itself runs off the UI thread: the posted command has to be dispatched, and
+        // that is what puts this thread inside the dialog's message loop.
+        using var accepted = new System.Threading.ManualResetEventSlim(false);
+        using var timer = new System.Threading.Timer(
+            _ => AcceptFolderDialog(accepted), null, TimeSpan.FromMilliseconds(500), Timeout.InfiniteTimeSpan);
+
+        NativeMethods.PostMessage(panel, NativeMethods.WM_COMMAND,
+            new IntPtr(InternalPanelWindow.IdDownloadFolderBrowse), browse);
+
+        if (!await Task.Run(() => accepted.Wait(TimeSpan.FromSeconds(20))))
+        {
+            throw new InvalidOperationException("The downloads-folder picker never appeared.");
+        }
+
+        // The field is filled from what the picker handed back, so it is never left empty.
+        await WaitForAsync(() => ReadFieldText(folderField).Length > 0, TimeSpan.FromSeconds(5));
+        await ClosePanelAndWaitAsync();
+    }
+
+    /// <summary>Accepts the folder picker this process owns, from a thread that is not blocked in it.</summary>
+    private void AcceptFolderDialog(System.Threading.ManualResetEventSlim accepted)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (DateTime.UtcNow < deadline)
+        {
+            var dialog = FindOwnedDialog();
+            if (dialog != IntPtr.Zero)
+            {
+                var ok = NativeMethods.GetDlgItem(dialog, NativeMethods.IDOK);
+                if (ok != IntPtr.Zero)
+                {
+                    NativeMethods.PostMessage(dialog, NativeMethods.WM_COMMAND, new IntPtr(NativeMethods.IDOK), ok);
+                    accepted.Set();
+                    return;
+                }
+            }
+
+            System.Threading.Thread.Sleep(100);
+        }
+    }
+
+    private static string ReadFieldText(IntPtr field)
+    {
+        var text = new System.Text.StringBuilder(512);
+        NativeMethods.GetWindowText(field, text, 512);
+        return text.ToString().Trim();
+    }
+
     /// <summary>Clicks a row button in the open panel, the way a mouse press and release does.</summary>
     private async Task ClickPanelRowButtonAsync(PanelRowButton button, int row)
     {

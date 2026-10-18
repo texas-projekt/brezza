@@ -478,6 +478,9 @@ internal sealed partial class BrowserShell
         // confirmation.
         await AssertDownloadControlsAsync();
 
+        // 16. The settings panel's downloads-folder picker opens, is accepted, and fills the field.
+        await AssertDownloadFolderPickerAsync();
+
         // Leave the session on the ordinary smoke page again, so the saved session can be verified.
         await NavigateThroughAddressBarAsync(pageUri.AbsoluteUri);
         await WaitForAsync(() =>

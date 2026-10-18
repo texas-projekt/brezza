@@ -9,6 +9,17 @@
 
 ## Unreleased
 
+### Fixed
+
+- The settings panel's downloads-folder picker crashed the browser. The `IFileDialog` declaration
+  was missing two vtable members, so `SetOptions` landed on a slot that takes a pointer and handed
+  it a value: the browser faulted with an access violation the moment Browse was clicked, which
+  took the whole process down rather than failing the dialog. The declaration now carries the two
+  members it never calls, the order is verified by reading options back after setting them, and the
+  picker reports a system refusal as a dismissal instead of throwing. The Windows smoke drives the
+  dialog end to end — opened from the settings panel, accepted, and the field filled — so the
+  picker cannot regress into a crash.
+
 - Added a configurable downloads folder and download progress controls. The settings panel grew a
   "Downloads to" row with a Browse button that opens the system folder picker, and the factory
   resolves the folder per download, so a new one applies to the next download without a restart; the

@@ -60,6 +60,11 @@ and a browser that closes loses it, exactly as an in-progress one does.
   folder.
 - The system folder picker is the one new COM surface. It is created through its coclass, shown
   owned by the panel, and a dialog the system refuses is reported as a dismissal rather than thrown.
+  Its `IFileDialog` declaration carries two members the picker never calls, because the vtable is
+  positional: a member that is missing shifts every method after it onto another method's slot, and
+  a picker that hands a value where a pointer belongs faults instead of failing. The order was
+  verified by reading options back after setting them, and the smoke drives the dialog end to end so
+  the picker cannot regress into a crash.
 - The Windows smoke drives the whole path against a slow attachment served by the local origin: the
   download is paused from its row, keeps its bytes, resumes, completes, and a second one is cancelled
   behind its confirmation. The visual baseline cannot show a running download, because a seeded

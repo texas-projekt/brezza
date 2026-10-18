@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 
 namespace Brezza.App.Native;
@@ -35,8 +36,13 @@ internal static class NativeFolderPicker
         [PreserveSig]
         int Show(IntPtr parent);
 
-        // IFileDialog. The members this picker does not use are declared only to keep the vtable
-        // order correct.
+        // Two members sit between Show and the ones below that this picker never calls. They are
+        // declared only to keep the vtable order correct: a member that is missing shifts every
+        // method after it onto another method's slot, which is how a picker ends up handing a
+        // value where a pointer belongs and faulting.
+        void UnusedAfterShow(IntPtr value);
+        void UnusedAfterShowTwo(IntPtr value);
+
         void SetFileTypes(uint count, IntPtr types);
         void SetFileTypeIndex(uint index);
         void GetFileTypeIndex(out uint index);
@@ -79,6 +85,12 @@ internal static class NativeFolderPicker
     /// Shows the picker over <paramref name="owner"/> and returns the folder the user chose, or
     /// null when the dialog was dismissed or the system would not show it.
     /// </summary>
+    /// <remarks>
+    /// The picker is a convenience, so nothing it does is worth a browser crash: a corrupted-state
+    /// exception from the COM surface is caught too, and a picker the system refuses is reported
+    /// as a dismissal rather than thrown.
+    /// </remarks>
+    [HandleProcessCorruptedStateExceptions]
     public static string? TryPick(IntPtr owner, string? initialPath, string title)
     {
         IFileDialog? dialog = null;
@@ -105,7 +117,9 @@ internal static class NativeFolderPicker
             result.GetDisplayName(DisplayNameFileSystemPath, out var folder);
             return string.IsNullOrWhiteSpace(folder) ? null : folder;
         }
-        catch (Exception exception) when (exception is COMException or InvalidCastException or NotSupportedException)
+        catch (Exception exception) when (
+            exception is COMException or InvalidCastException or NotSupportedException or
+                ArgumentException or AccessViolationException or SEHException)
         {
             // A picker the system refuses is a dismissal: the caller keeps its own error path.
             return null;
