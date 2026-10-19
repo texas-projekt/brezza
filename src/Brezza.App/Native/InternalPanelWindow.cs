@@ -114,6 +114,13 @@ internal sealed class InternalPanelWindow : IDisposable
 {
     public const string WindowClassName = "BrezzaInternalPanel";
 
+    // One window class per process, one static procedure. A per-instance delegate would make every
+    // later panel send its messages to the first instance once the class was already registered.
+    private static readonly NativeMethods.WndProc ClassProcedure = RouteMessage;
+    private static readonly Dictionary<IntPtr, InternalPanelWindow> Instances = new();
+    private static InternalPanelWindow? _creating;
+    private static bool _registered;
+
     public const int IdTitle = 2001;
     public const int IdPresetLabel = 2002;
     public const int IdPreset = 2003;
@@ -147,7 +154,6 @@ internal sealed class InternalPanelWindow : IDisposable
     private const string GlyphResume = "\uE768";
     private const string GlyphCancel = "\uE894";
 
-    private readonly NativeMethods.WndProc _wndProc;
     private readonly Localization _localization;
     private readonly IntPtr _owner;
     private readonly NativeThemeSource _themeSource;
@@ -205,7 +211,6 @@ internal sealed class InternalPanelWindow : IDisposable
         _owner = owner;
         _themeSource = themeSource ?? throw new ArgumentNullException(nameof(themeSource));
         _theme = new NativeThemeResources(_themeSource);
-        _wndProc = OnWindowMessage;
         _buttons = new FlatButtonSet(_theme, _fonts, () => _dpi);
         _fields = new FlatFieldSet(_theme, _fonts, () => _dpi);
         _listSubclass = OnListMessage;
@@ -273,7 +278,7 @@ internal sealed class InternalPanelWindow : IDisposable
     {
         _mode = InternalPanelMode.Settings;
         _savedTemplate = template;
-        _savedLanguage = language;
+        _savedLanguage = string.IsNullOrWhiteSpace(language) ? string.Empty : Localization.Normalize(language);
         _savedTheme = BrowserSettings.NormalizeTheme(theme);
         _savedStartup = BrowserSettings.NormalizeStartupBehavior(startupBehavior);
         _savedDownloadFolder = downloadsFolder ?? string.Empty;
@@ -412,6 +417,7 @@ internal sealed class InternalPanelWindow : IDisposable
     {
         if (_hwnd == IntPtr.Zero) return;
         DialogKeyboard.Unregister(_hwnd);
+        Instances.Remove(_hwnd);
         // The renderers drop the controls that are about to be destroyed and stay usable for the
         // next time the panel opens.
         _buttons.Dispose();
@@ -435,6 +441,21 @@ internal sealed class InternalPanelWindow : IDisposable
 
     // ---------- Window procedure ----------
 
+    private static IntPtr RouteMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        if (!Instances.TryGetValue(hWnd, out var panel) && _creating is { } creating)
+        {
+            // Messages sent during CreateWindowEx arrive before the handle reaches the caller.
+            panel = creating;
+            Instances[hWnd] = panel;
+        }
+
+        if (msg == 0x0082) Instances.Remove(hWnd); // WM_NCDESTROY
+        return panel is null
+            ? NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam)
+            : panel.OnWindowMessage(hWnd, msg, wParam, lParam);
+    }
+
     private IntPtr OnWindowMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
         try
@@ -442,7 +463,17 @@ internal sealed class InternalPanelWindow : IDisposable
             switch (msg)
             {
                 case NativeMethods.WM_CREATE:
-                    CreateControls(hWnd);
+                    try
+                    {
+                        CreateControls(hWnd);
+                    }
+                    catch (Exception exception)
+                    {
+                        // Abort the panel instead of showing a window with missing controls.
+                        Trace.TraceError("The panel controls could not be created: {0}", exception);
+                        return new IntPtr(-1);
+                    }
+
                     return IntPtr.Zero;
 
                 case NativeMethods.WM_ACTIVATE when NativeMethods.GetLoWord(wParam) == NativeMethods.WA_INACTIVE:
@@ -627,15 +658,25 @@ internal sealed class InternalPanelWindow : IDisposable
     private void EnsureCreated()
     {
         if (_hwnd != IntPtr.Zero) return;
-        var wndClass = new NativeMethods.WNDCLASSEX
+        if (!_registered)
         {
-            cbSize = (uint)Marshal.SizeOf<NativeMethods.WNDCLASSEX>(),
-            lpfnWndProc = _wndProc,
-            hInstance = NativeMethods.GetModuleHandle(null),
-            hCursor = NativeMethods.LoadCursor(IntPtr.Zero, new IntPtr(32512)),
-            lpszClassName = WindowClassName,
-        };
-        NativeMethods.RegisterClassEx(ref wndClass);
+            var wndClass = new NativeMethods.WNDCLASSEX
+            {
+                cbSize = (uint)Marshal.SizeOf<NativeMethods.WNDCLASSEX>(),
+                lpfnWndProc = ClassProcedure,
+                hInstance = NativeMethods.GetModuleHandle(null),
+                hCursor = NativeMethods.LoadCursor(IntPtr.Zero, new IntPtr(32512)),
+                lpszClassName = WindowClassName,
+            };
+            if (NativeMethods.RegisterClassEx(ref wndClass) == 0 &&
+                Marshal.GetLastWin32Error() != NativeMethods.ERROR_CLASS_ALREADY_EXISTS)
+            {
+                throw new InvalidOperationException(
+                    "The panel window class could not be registered (error " + Marshal.GetLastWin32Error() + ").");
+            }
+
+            _registered = true;
+        }
 
         // The panel opens on the owner's monitor, so its DPI decides the initial size.
         var ownerDpi = _owner == IntPtr.Zero ? 0 : NativeMethods.GetDpiForWindow(_owner);
@@ -645,25 +686,34 @@ internal sealed class InternalPanelWindow : IDisposable
         var width = Scale(680);
         var height = Scale(560);
         var (x, y) = CenterOverOwner(width, height);
-        _hwnd = NativeMethods.CreateWindowEx(
-            0,
-            WindowClassName,
-            _localization.Get(TitleKey()),
-            // No minimize or maximize box: this is a fixed-purpose panel, and an owned window that
-            // minimizes has no taskbar button to come back from.
-            NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU |
-            NativeMethods.WS_THICKFRAME | NativeMethods.WS_CLIPCHILDREN,
-            x, y, width, height,
-            _owner,
-            IntPtr.Zero,
-            NativeMethods.GetModuleHandle(null),
-            IntPtr.Zero);
+        _creating = this;
+        try
+        {
+            _hwnd = NativeMethods.CreateWindowEx(
+                0,
+                WindowClassName,
+                _localization.Get(TitleKey()),
+                // No minimize or maximize box: this is a fixed-purpose panel, and an owned window that
+                // minimizes has no taskbar button to come back from.
+                NativeMethods.WS_OVERLAPPED | NativeMethods.WS_CAPTION | NativeMethods.WS_SYSMENU |
+                NativeMethods.WS_THICKFRAME | NativeMethods.WS_CLIPCHILDREN,
+                x, y, width, height,
+                _owner,
+                IntPtr.Zero,
+                NativeMethods.GetModuleHandle(null),
+                IntPtr.Zero);
+        }
+        finally
+        {
+            _creating = null;
+        }
         if (_hwnd == IntPtr.Zero)
         {
             throw new InvalidOperationException(
                 "The browser panel could not be created (error " + Marshal.GetLastWin32Error() + ").");
         }
 
+        Instances[_hwnd] = this;
         ApplyFonts();
         ApplyControlTheme();
         DialogKeyboard.Register(_hwnd);
@@ -804,6 +854,7 @@ internal sealed class InternalPanelWindow : IDisposable
             _localization.Get("settings.languageSystem"),
             _localization.Get("settings.languageEnglish"),
             _localization.Get("settings.languageChinese"),
+            _localization.Get("settings.languageTraditional"),
         }, CurrentSelection(_languageCombo, LanguageIndex(_savedLanguage)));
     }
 
@@ -869,13 +920,23 @@ internal sealed class InternalPanelWindow : IDisposable
     private static int StartupIndex(BrowserStartupBehavior behavior) =>
         behavior == BrowserStartupBehavior.RestoreSession ? 1 : 0;
 
-    /// <summary>Index of a language value in the settings combo: system, English, Chinese.</summary>
-    private static int LanguageIndex(string? language) => language switch
+    /// <summary>Index of a language value in the settings combo: system, English, Simplified, Traditional.</summary>
+    private static int LanguageIndex(string? language)
     {
-        Localization.Chinese => 2,
-        Localization.English => 1,
-        _ => 0,
-    };
+        if (string.IsNullOrWhiteSpace(language)) return 0;
+        var normalized = Localization.Normalize(language);
+        // Normalize maps unknown values to English; an unknown stored value is better shown as
+        // the system default than as an explicit English choice.
+        if (normalized == Localization.English &&
+            !language!.Trim().StartsWith("en", StringComparison.OrdinalIgnoreCase)) return 0;
+        return normalized switch
+        {
+            Localization.TraditionalChinese => 3,
+            Localization.Chinese => 2,
+            Localization.English => 1,
+            _ => 0,
+        };
+    }
 
     private void ApplyPresetSelection()
     {
@@ -935,6 +996,7 @@ internal sealed class InternalPanelWindow : IDisposable
         var index = (int)NativeMethods.SendMessage(_languageCombo, NativeMethods.CB_GETCURSEL, IntPtr.Zero, IntPtr.Zero);
         return index switch
         {
+            3 => Localization.TraditionalChinese,
             2 => Localization.Chinese,
             1 => Localization.English,
             _ => string.Empty,
@@ -1323,6 +1385,21 @@ internal sealed class InternalPanelWindow : IDisposable
 
     /// <summary>Row hover, click to open, the per-row buttons, and the Delete key.</summary>
     private IntPtr OnListMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, IntPtr id, IntPtr data)
+    {
+        try
+        {
+            return OnListMessageCore(hWnd, msg, wParam, lParam);
+        }
+        catch (Exception exception)
+        {
+            // The list is a system control; an exception must not escape its subclass.
+            Trace.TraceError("The panel list message {0} failed: {1}", msg, exception);
+        }
+
+        return NativeMethods.DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    private IntPtr OnListMessageCore(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
         switch (msg)
         {

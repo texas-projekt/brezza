@@ -21,7 +21,7 @@ tool (`.config/dotnet-tools.json`) during packaging only. The package then holds
 
 - `Brezza.exe` (all managed assemblies)
 - `WebView2Loader.dll` (native, cannot merge)
-- `BrowserUi/locales/{en,zh-Hans}.json` (content, not merged)
+- `BrowserUi/locales/{en,zh-Hans,zh-Hant}.json` (content, not merged)
 
 ILRepack runs without `/internalize`: internalizing the WebView2 interop types breaks
 `CoreWebView2.Raw.EventRegistrationToken` and the content surface never appears. The merged output
@@ -37,6 +37,6 @@ step for CI runs that have no interactive desktop.
 
 The package is one executable plus the native loader and the language packs. Adding an assembly to
 the solution means adding it to the merge list in `tools/package.ps1`. ILRepack is a packaging-time
-dependency only, pinned in the tool manifest, and its version is recorded here rather than
+dependency only, pinned in the tool manifest (`dotnet-ilrepack` 2.0.48), and its version is recorded here rather than
 introduced silently. A true single file would require embedding the language packs as resources and
 extracting the native loader at runtime, or porting to .NET; both are out of scope.

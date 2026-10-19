@@ -57,6 +57,7 @@ $presets = [ordered]@{
     TabPrivate          = @{ Class = 'BrezzaMainWindow';     Width = 1120; Height = 760; Focus = 0;    File = 'brezza-tabs-private.png' }
     TabsWheel           = @{ Class = 'BrezzaMainWindow';     Width = 1120; Height = 760; Focus = 0;    File = 'brezza-tabs-restored.png' }
     ToolbarZh           = @{ Class = 'BrezzaMainWindow';     Width = 1120; Height = 760; Focus = 0;    File = 'brezza-toolbar-zh.png' }
+    ToolbarZhHant       = @{ Class = 'BrezzaMainWindow';     Width = 1120; Height = 760; Focus = 0;    File = 'brezza-toolbar-zh-hant.png' }
     TabLoading          = @{ Class = 'BrezzaMainWindow';     Width = 1120; Height = 760; Focus = 0;    File = 'brezza-loading-state.png' }
 }
 
@@ -118,18 +119,19 @@ public static class BrezzaWindowCapture
     public static IntPtr FindWindow(uint processId, string className)
     {
         var matches = new List<IntPtr>();
-        bool Collect(IntPtr hWnd, IntPtr lParam)
+        EnumWindowsProc collect = (hWnd, lParam) =>
         {
             if (!IsWindowVisible(hWnd)) return true;
-            GetWindowThreadProcessId(hWnd, out var owner);
+            uint owner;
+            GetWindowThreadProcessId(hWnd, out owner);
             if (owner != processId) return true;
             var name = new StringBuilder(256);
             GetClassName(hWnd, name, name.Capacity);
             if (string.Equals(name.ToString(), className, StringComparison.Ordinal)) matches.Add(hWnd);
             return true;
-        }
+        };
 
-        var callback = new EnumWindowsProc(Collect);
+        var callback = new EnumWindowsProc(collect);
         EnumWindows(callback, IntPtr.Zero);
         GC.KeepAlive(callback);
 
@@ -196,7 +198,8 @@ public static class BrezzaWindowCapture
 
     public static Dictionary<string, int> WindowRectangle(IntPtr hWnd)
     {
-        GetWindowRect(hWnd, out var rect);
+        RECT rect;
+        GetWindowRect(hWnd, out rect);
         return new Dictionary<string, int>
         {
             { "x", rect.left }, { "y", rect.top },
@@ -214,7 +217,8 @@ public static class BrezzaWindowCapture
     public static byte[] Capture(IntPtr hWnd, out int width, out int height)
     {
         EnsureCapturable(hWnd);
-        GetWindowRect(hWnd, out var rect);
+        RECT rect;
+        GetWindowRect(hWnd, out rect);
         width = rect.right - rect.left;
         height = rect.bottom - rect.top;
         if (width <= 0 || height <= 0)
@@ -347,6 +351,16 @@ function Read-AppSetting([string]$element) {
 
 $exePath = Join-Path $projectRoot 'src\Brezza.App\bin\Debug\net48\Brezza.exe'
 $build = if (Test-Path $exePath) { 'Brezza.exe ' + (Get-Item $exePath).LastWriteTimeUtc.ToString('o') } else { 'unknown' }
+$commit = 'unknown'
+$dirty = 'unknown'
+try {
+    $commit = (& git -C $projectRoot rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) { $commit = 'unknown' }
+    $dirty = if (@(& git -C $projectRoot status --porcelain 2>$null).Count -gt 0) { 'true' } else { 'false' }
+}
+catch {
+    # The manifest still records the capture when git is unavailable.
+}
 
 $entry = [pscustomobject]@{
     scenario     = $Scenario
@@ -362,6 +376,8 @@ $entry = [pscustomobject]@{
     language     = Read-AppSetting 'language'
     capturedUtc  = (Get-Date).ToUniversalTime().ToString('o')
     build        = $build
+    commit       = $commit
+    dirty        = $dirty
 }
 
 $manifestPath = Join-Path $artifactsRoot 'capture-manifest.json'

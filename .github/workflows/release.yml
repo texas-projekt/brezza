@@ -10,7 +10,7 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -19,6 +19,10 @@ concurrency:
 jobs:
   package:
     runs-on: windows-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -29,7 +33,7 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - run: dotnet restore Brezza.slnx
+      - run: dotnet restore Brezza.slnx --locked-mode
 
       - run: dotnet build Brezza.slnx -c Release --no-restore
 
@@ -44,6 +48,9 @@ jobs:
         run: |
           $tag = '${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}'
           $version = $tag.TrimStart('v')
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "Tag '$tag' is not semver (expected vX.Y.Z or vX.Y.Z-prerelease)."
+          }
           "version=$version" >> $env:GITHUB_OUTPUT
           "prerelease=$(if ($tag -match '-') { 'true' } else { 'false' })" >> $env:GITHUB_OUTPUT
 
@@ -58,13 +65,21 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: brezza-${{ steps.version.outputs.version }}
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
           retention-days: 30
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.zip
 
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           name: ${{ steps.version.outputs.version }}
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256
           prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
           generate_release_notes: true

@@ -44,6 +44,8 @@ internal sealed partial class BrowserShell : IDisposable
     private SessionStore? _sessionStore;
     private DownloadStore? _downloadStore;
     private DownloadRegistry? _downloads;
+    private readonly PopupRequestLimiter _popupLimiter = new();
+    private readonly PermissionNoticeLimiter _permissionNotices = new();
     private DateTime _lastDownloadProgressUiUtc = DateTime.MinValue;
 
     /// <summary>How often the downloads panel is refreshed while a download reports progress.</summary>
@@ -78,7 +80,7 @@ internal sealed partial class BrowserShell : IDisposable
         _window.Show();
         _window.SetTimerEnabled(SleepTimerId, true);
         if (!preferencesLoaded) return _window.RunMessageLoop();
-        InitializeAsync();
+        Observe(InitializeAsync);
         return _window.RunMessageLoop();
     }
 
@@ -102,6 +104,7 @@ internal sealed partial class BrowserShell : IDisposable
         _window.ContentBoundsChanged += OnContentBoundsChanged;
         _window.ThemeChanged += (_, _) => ApplyThemeToContent();
         _window.AddressSuggestionsProvider = GetAddressSuggestions;
+        _window.SessionEndingRequested += (_, _) => SaveBrowserData();
     }
 
     // ---------- Startup ----------
@@ -137,8 +140,9 @@ internal sealed partial class BrowserShell : IDisposable
         }
     }
 
-    private async void InitializeAsync()
+    private async Task InitializeAsync()
     {
+        if (_shutdownStarted) return;
         try
         {
             WebView2Runtime.EnsureAvailable();
@@ -157,6 +161,7 @@ internal sealed partial class BrowserShell : IDisposable
 
         try
         {
+            if (_shutdownStarted) return;
             _hostFactory = new WebView2TabHostFactory(
                 Path.Combine(_dataRoot, "WebView2"),
                 _window.Handle,
@@ -176,10 +181,20 @@ internal sealed partial class BrowserShell : IDisposable
             _runtime.NavigationCompleted += OnTabNavigationCompleted;
             _runtime.PrivateCleanupCompleted += OnPrivateCleanupCompleted;
             _runtime.PopupRequested += OnPopupRequested;
+            _runtime.ExternalSchemeBlocked += OnExternalSchemeBlocked;
             _runtime.DownloadStarted += OnDownloadStarted;
+            _runtime.DownloadBlocked += OnDownloadBlocked;
             _runtime.DownloadStatusChanged += OnDownloadStatusChanged;
             _runtime.DownloadProgressChanged += OnDownloadProgressChanged;
             _runtime.PermissionRequested += OnPermissionRequested;
+
+            if (_shutdownStarted) return;
+
+            // Private profiles are not persisted, but a crash can leave a folder behind. The
+            // factory keeps folders whose owner process is still alive, so this is safe with a
+            // second instance.
+            await _runtime.CleanupOrphanedPrivateDataAsync();
+            if (_shutdownStarted) return;
 
             // The download list is browser state Core owns; the store only persists it. Restoring
             // the stored records keeps the list across sessions, and a private download is never
@@ -191,6 +206,7 @@ internal sealed partial class BrowserShell : IDisposable
             // caches what Core already tracks as the tab's favicon URI.
             _favicons = new TabFaviconCache(
                 tabId => _runtime is { } runtime ? runtime.GetFaviconAsync(tabId) : Task.FromResult<Stream?>(null),
+                tabId => _runtime?.HasContent(tabId) == true,
                 () => _window.InvalidateTabStrip());
 
             // The saved session is only opened when the user chose that startup behavior; the
@@ -203,6 +219,7 @@ internal sealed partial class BrowserShell : IDisposable
             if (_tabs.Tabs.Count == 0) _tabs.Create();
 
             await _runtime.ActivateAsync(session.ActiveTabId ?? _tabs.Tabs[0].Id);
+            if (_shutdownStarted) return;
             RenderState();
 #if DEBUG
             var smokeMode = Environment.GetEnvironmentVariable("BREZZA_UI_SMOKE");
@@ -483,6 +500,7 @@ internal sealed partial class BrowserShell : IDisposable
             _localization.LoadLanguage(EffectiveLanguage);
             _window.ApplyLanguage();
             _panel?.ApplyLanguage();
+            if (_noticeKey is not null) _window.SetNotice(_noticeKey, _noticeDetail);
             RenderState();
             // The theme goes last: its synchronous repaint then shows the new language and palette
             // together. Every window follows the shared source; nothing is pushed per window.
@@ -952,8 +970,17 @@ internal sealed partial class BrowserShell : IDisposable
 
     // ---------- Runtime events ----------
 
+    private void OnExternalSchemeBlocked(object? sender, ExternalSchemeBlockedEventArgs e) =>
+        SendNotice("notice.externalSchemeBlocked", e.Uri);
+
     private void OnPopupRequested(object? sender, PopupRequestedEventArgs e)
     {
+        if (!_popupLimiter.TryAcquire(e.TabId, e.IsUserInitiated, DateTime.UtcNow))
+        {
+            SendNotice("notice.popupBlocked", e.TargetUrl);
+            return;
+        }
+
         Uri? target = null;
         var isBlank = string.IsNullOrEmpty(e.TargetUrl) ||
             string.Equals(e.TargetUrl, "about:blank", StringComparison.OrdinalIgnoreCase);
@@ -986,6 +1013,16 @@ internal sealed partial class BrowserShell : IDisposable
 
         SendNotice("notice.downloadStarted", Path.GetFileName(e.TargetFilePath));
         RefreshDownloadsPanel();
+    }
+
+    private void OnDownloadBlocked(object? sender, DownloadBlockedEventArgs e)
+    {
+        // The detail names the file and why it was refused; the key alone would leave the user
+        // without the one fact that explains the missing download.
+        var reason = _localization.Get(e.Reason == DownloadBlockReason.TooLarge
+            ? "notice.downloadBlockedTooLarge"
+            : "notice.downloadBlockedTooMany");
+        SendNotice("notice.downloadBlocked", reason + ": " + e.SuggestedFileName);
     }
 
     private void OnDownloadStatusChanged(object? sender, DownloadStatusChangedEventArgs e)
@@ -1036,6 +1073,7 @@ internal sealed partial class BrowserShell : IDisposable
     private void OnPermissionRequested(object? sender, PermissionRequestedEventArgs e)
     {
         if (e.IsAllowed) return;
+        if (!_permissionNotices.ShouldNotify(e.SourceUrl, e.Kind, DateTime.UtcNow)) return;
         SendNotice("notice.permissionDenied", e.SourceUrl);
     }
 
@@ -1111,14 +1149,36 @@ internal sealed partial class BrowserShell : IDisposable
     // The notice the window shows, so a page that recovers can clear exactly the notice its
     // failure raised and leave unrelated notices (downloads, permissions) in place.
     private string? _noticeKey;
+    private string? _noticeDetail;
 
     private void SendNotice(string? key, string? detail = null)
     {
         _noticeKey = key;
+        _noticeDetail = detail;
         _window.SetNotice(key, detail);
     }
 
     // ---------- Shutdown ----------
+
+    /// <summary>
+    /// Saves the data that must survive a normal close or a Windows session end. Called
+    /// synchronously from WM_QUERYENDSESSION, where waiting for the asynchronous shutdown would be
+    /// too late.
+    /// </summary>
+    private void SaveBrowserData()
+    {
+        try
+        {
+            _historyStore?.Save();
+            _bookmarkStore?.Save();
+            if (_tabs is not null) _sessionStore?.Save(_tabs.Tabs, _tabs.ActiveTab?.Id);
+        }
+        catch (Exception exception)
+        {
+            // Saving must never block the close or the session end.
+            TraceError("Browser data could not be saved", exception);
+        }
+    }
 
     private async Task ShutdownAsync()
     {
@@ -1128,16 +1188,7 @@ internal sealed partial class BrowserShell : IDisposable
         _window.SetTimerEnabled(PrivateCleanupTimerId, false);
         _panel?.Close();
 
-        try
-        {
-            _historyStore?.Save();
-            _bookmarkStore?.Save();
-            if (_tabs is not null) _sessionStore?.Save(_tabs.Tabs, _tabs.ActiveTab?.Id);
-        }
-        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
-        {
-            TraceError("Browser data could not be saved", exception);
-        }
+        SaveBrowserData();
 
         try
         {

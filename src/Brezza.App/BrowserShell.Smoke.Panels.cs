@@ -225,7 +225,8 @@ internal sealed partial class BrowserShell
         var expectedLanguage = _localization.Get("settings.languageSystem");
         var acceptsEnglish = languageText.IndexOf(_localization.Get("settings.languageEnglish"), StringComparison.Ordinal) >= 0;
         var acceptsChinese = languageText.IndexOf(_localization.Get("settings.languageChinese"), StringComparison.Ordinal) >= 0;
-        if (languageText.IndexOf(expectedLanguage, StringComparison.Ordinal) < 0 && !acceptsEnglish && !acceptsChinese)
+        var acceptsTraditional = languageText.IndexOf(_localization.Get("settings.languageTraditional"), StringComparison.Ordinal) >= 0;
+        if (languageText.IndexOf(expectedLanguage, StringComparison.Ordinal) < 0 && !acceptsEnglish && !acceptsChinese && !acceptsTraditional)
         {
             throw new InvalidOperationException("The settings panel does not show a supported language: " + languageText);
         }

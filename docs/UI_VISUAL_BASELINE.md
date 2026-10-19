@@ -63,7 +63,8 @@ and build. Re-capturing a scenario replaces its file and its manifest entry.
 | TabGlobe | `artifacts/brezza-tabs-globe.png` | A page with no favicon leads with the built-in globe glyph from the shell's icon font |
 | TabPrivate | `artifacts/brezza-tabs-private.png` | A private tab leads with its private glyph alone and keeps the page's own title |
 | TabsWheel | `artifacts/brezza-tabs-restored.png` | Wheel direction changes the Core active tab without disturbing the row |
-| ToolbarZh | `artifacts/brezza-toolbar-zh.png` | Localized toolbar labels and private-tab action remain readable |
+| ToolbarZh | `artifacts/brezza-toolbar-zh.png` | Localized toolbar labels and private-tab action remain readable in Simplified Chinese |
+| ToolbarZhHant | `artifacts/brezza-toolbar-zh-hant.png` | The Traditional Chinese pack renders the toolbar, new-tab page, and address placeholder |
 | TabLoading | `artifacts/brezza-loading-state.png` | Active tab shows a loading ellipsis without changing toolbar geometry |
 
 ## Producing the baseline

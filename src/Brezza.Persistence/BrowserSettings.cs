@@ -1,5 +1,6 @@
 using System.IO;
 using System.Xml.Serialization;
+using Brezza.Core.Localization;
 using Brezza.Core.Navigation;
 
 namespace Brezza.Persistence;
@@ -32,12 +33,8 @@ public sealed class BrowserSettings
     [XmlElement("downloadsFolder")]
     public string DownloadsFolder { get; set; } = string.Empty;
 
-    public static string NormalizeLanguage(string? language)
-    {
-        if (string.Equals(language, "zh-Hans", System.StringComparison.OrdinalIgnoreCase)) return "zh-Hans";
-        if (string.Equals(language, "en", System.StringComparison.OrdinalIgnoreCase)) return "en";
-        return string.Empty;
-    }
+    public static string NormalizeLanguage(string? language) =>
+        BrowserLanguagePolicy.TryNormalize(language, out var normalized) ? normalized : string.Empty;
 
     public static BrowserThemeMode NormalizeTheme(BrowserThemeMode theme) =>
         theme is BrowserThemeMode.Light or BrowserThemeMode.Dark

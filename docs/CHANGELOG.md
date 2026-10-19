@@ -1,15 +1,119 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added a complete Traditional Chinese (`zh-Hant`) language pack and a Settings language choice.
+  `zh-TW`, `zh-HK`, and `zh-MO` select it, stored values are normalized to `zh-Hant`, and the Unit
+  stage checks that all three packs have identical keys and placeholders.
+- Added single-instance behavior: a second launch restores and activates the existing window instead
+  of creating another WebView2 user-data tree; the session-local mutex leaves separate Windows users
+  independent.
+- Added a browser-wide download guardrail: at most three live downloads and an 8 GiB cap when the
+  total size is known before start. A refused download creates no partial file and reports a
+  localized reason.
 - Added a persisted native chrome theme preference with System, Light, and Dark modes. The main window and native settings/history/bookmark panels share the resolved palette, and toolbar layout now keeps the address control within its row at high DPI. Settings schema 1 files continue to load with the System theme.
 - Polished native interaction details: restored the address cue banner on the inner edit control, added a visible active-tab close button, added compact controls for the minimum window size, fixed dark notice and panel colors, and measured localized panel buttons with the actual UI font.
 - Added explicit native empty-state controls for history/bookmarks and darkened the settings panel's combo boxes so localized panel states remain readable in dark mode.
 - Added a loading marker to the active tab while WebView2 navigation is in progress, with a smoke assertion that the marker disappears after completion.
-- Reapplied main-window localization after top-level HWND creation so startup labels are not lost during the Win32 `WM_CREATE` lifetime boundary.
-- Fixed tab-strip mouse-wheel direction handling so wheel scrolling activates the tab Core tracks, including negative signed wheel deltas.
-
-## Unreleased
 
 ### Fixed
+
+- Removed the race in the smoke origin: its job now chooses and binds the port itself and reports it
+  only after `HttpListener.Start`, instead of releasing a parent-allocated port for the job to reuse.
+- Replaced hardcoded visual-baseline control ids with reflection into `MainWindow`, and replaced
+  layout sleeps with paint, menu, tab-count, and window conditions. The capture tools now compile
+  under Windows PowerShell 5.1 again, and the visual pass completes and captures a Traditional
+  Chinese toolbar.
+- Enforced the coverage floors (85% line, 70% branch) in the Unit stage and added the three-language
+  pack key/placeholder check to the same stage.
+- Reapplied main-window localization after top-level HWND creation so startup labels are not lost during the Win32 `WM_CREATE` lifetime boundary.
+- Fixed tab-strip mouse-wheel direction handling so wheel scrolling activates the tab Core tracks, including negative signed wheel deltas.
+- Hardened the native shell against callback failures. The tab strip, address edit, owner-drawn
+  buttons and fields, panel list, and message-loop window procedures now catch managed exceptions,
+  trace them, and fall back to `DefSubclassProc`/`DefWindowProc`; previously an exception could cross
+  the native frame and terminate the process. The 20-second shutdown guard timer now actually forces
+  the window closed instead of firing an unhandled timer id.
+- Protected the address field from state renders. A tab switch or page event no longer overwrites
+  text the user is still editing, opening the suggestion drop-down restores the draft instead of the
+  last committed URL, and submitting or pressing Escape clears the draft explicitly.
+- Made WebView2 controller creation recoverable. A failed controller is detached and closed, the
+  failed creation task is replaced on the next navigation, and a failed environment initialization is
+  no longer cached forever. Closing a tab whose host creation failed now still completes the close
+  and activates the adjacent tab.
+- Quarantined unreadable persistence files as `*.corrupt-<ticks>` instead of treating them as empty
+  and letting the next save overwrite the only copy. Temporary IO failures are left in place.
+- Corrected the README's visual-capture instructions, made `capture-baseline.ps1` report unknown
+  `-Only` scenarios instead of silently passing, and made `package.ps1` run the pinned merge tool
+  from the repository root and terminate the launch-verification process on failure.
+- Stopped one invalid settings field from discarding the rest: an invalid search template now falls
+  back to the default template while the saved language, theme, startup behavior, and downloads
+  folder still load.
+- Validated stored download timestamps and interrupt reasons before constructing records, so a
+  hand-edited or damaged `downloads.xml` cannot make the list throw.
+- Added per-key English fallback for missing language-pack entries and re-render the current notice
+  after a language switch instead of leaving the old language on screen.
+- Stabilized the Windows smoke's folder-picker step: it posted `IDOK` into the dialog before the
+  picker had finished creating its controls, which could crash the process in `ucrtbase.dll`. It now
+  waits for the dialog to settle, verifies the handles, and sends `BM_CLICK` to the OK button; the
+  cookie panel also waits for both planted cookies before asserting. Smoke passes three consecutive
+  runs.
+- Gave navigation-failure events the runtime's navigation id. Core records the newest id per tab and
+  ignores a late failure from an older navigation, so it cannot mark a newer successful page as
+  failed; two Core tests cover the stale and current cases.
+- Aborted window/panel creation when `CreateControls` fails instead of leaving a half-created
+  window, declared `IFileDialog` in its real vtable order, stopped selecting the first tab when the
+  active id is unknown, released a region when `SetWindowRgn` fails, made the packager validate
+  semver and overwrite its own archive, and de-duplicated restored/live download entries.
+- Recover from a WebView2 process failure: the controller is invalidated, its downloads are reported
+  interrupted, Core marks the tab failed, and Reload/navigation creates a fresh controller.
+- Clarified the private-download contract: the record is session-only, while the downloaded file is
+  written to the normal Downloads folder and stays there.
+- The packager writes a SHA256 sidecar; the release workflow validates the tag as semver, uploads
+  the checksum with the archive, and generates GitHub build provenance.
+- The default downloads folder now comes from the Windows Downloads Known Folder, so a redirected or
+  OneDrive folder is honoured.
+- Cached a document with no favicon by tab and URI, so ordinary state renders no longer ask the
+  host again; a tab without a controller is not treated as a negative result.
+- External URI schemes now follow a Core policy: only a user gesture may launch `mailto`, `tel`, or
+  `sms`; script-initiated and unknown schemes are cancelled and reported in the notice area.
+- Popups now require a user gesture, are limited to one per tab every two seconds and five per
+  minute overall, and a blocked popup reports a notice. Permission-denied notices are throttled to
+  one per source and permission kind every 30 seconds.
+- The visual capture manifest now records the git commit and dirty state. The smoke script stops
+  its origin job even when setup fails before the main run.
+- Unit tests now collect Cobertura coverage through coverlet (ADR 0012); the stage enforces 85%
+  line / 70% branch floors.
+- Wheel scrolling now asks Core to activate the tab before moving the native selection, and the
+  panel window class routes messages through one static procedure so reopened/second instances do
+  not reach a stale delegate.
+- `ExecuteScriptAsync` is compiled only in Debug builds, and DevTools are disabled in Release.
+- Reorganized the changelog under `Unreleased` with `Added` and `Fixed` sections.
+- Hardened download names: Windows device names (`CON`, `NUL`, `COM1`, `LPT1`, …) are prefixed,
+  names are capped at 120 characters with the extension preserved, numbered duplicates stay within
+  the cap, and a failed target-path setup cancels that download instead of throwing through the
+  WebView2 event.
+- Kept a tab host alive while it owns a running or paused download. Closing the host now reports
+  those downloads as interrupted before their operations are dropped, so the list no longer keeps a
+  record stuck InProgress. A background navigation also refreshes the host's idle timestamp.
+- Made private-profile cleanup durable: each profile carries an `owner.txt`, startup scans
+  `PrivateSessions` for profiles whose owner process is gone, and unknown older profiles are only
+  removed after a day. A second running instance's profile is never deleted.
+- Added Tab/Shift+Tab navigation to the main window without stealing Enter/Escape from the address
+  field, drew a focus frame on square caption buttons, switched the custom-drawn chrome to the
+  Windows high-contrast system colors when high contrast is enabled, and sized the initial window
+  in logical pixels for the monitor DPI.
+- Made startup cancellable when the window closes, saved browser data synchronously on
+  `WM_QUERYENDSESSION`, treated a failed `GetMessage` as an error, and cleared the window handle
+  during shutdown instead of destroying it twice.
+- Pinned the SDK in `global.json`, added NuGet lock files and locked-mode restores, enabled
+  deterministic CI builds, and made the test project run on both net10.0 and net48.
+- Made `TabRuntimeManager`'s host, creation, activity-time, and navigation-generation maps
+  concurrent, serialized the restore-navigation check/start/register sequence, and made the sleep
+  sweep deterministic when activation timestamps tie. The net48 suite now passes repeatedly.
+- Corrected the architecture, product, roadmap, testing, and ADR text for schema 4, quarantined
+  stores, the six toolbar panels, package contents, and the pinned ILRepack version.
 
 - The settings panel's downloads-folder picker crashed the browser. The `IFileDialog` declaration
   was missing two vtable members, so `SetOptions` landed on a slot that takes a pointer and handed

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace Brezza.App.Native;
@@ -164,7 +165,7 @@ internal sealed class FlatButtonSet : IDisposable
         NativePaint.Text(item.hDC, text, rect, font, foreground,
             NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE | NativeMethods.DT_END_ELLIPSIS);
 
-        if (focused && !square) NativePaint.FrameRounded(item.hDC, rect, radius, palette.Accent, _theme);
+        if (focused) NativePaint.FrameRounded(item.hDC, rect, square ? 0 : radius, palette.Accent, _theme);
         return true;
     }
 
@@ -193,6 +194,21 @@ internal sealed class FlatButtonSet : IDisposable
     }
 
     private IntPtr OnButtonMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, IntPtr id, IntPtr data)
+    {
+        try
+        {
+            return OnButtonMessageCore(hWnd, msg, wParam, lParam);
+        }
+        catch (Exception exception)
+        {
+            // A managed exception must never cross the native callback boundary.
+            Trace.TraceError("The button message {0} failed: {1}", msg, exception);
+        }
+
+        return NativeMethods.DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    private IntPtr OnButtonMessageCore(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
         switch (msg)
         {

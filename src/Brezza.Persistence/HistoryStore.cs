@@ -98,6 +98,7 @@ public sealed class HistoryStore
         catch (Exception exception) when (exception is IOException || exception is InvalidOperationException || exception is ArgumentException)
         {
             _entries.Clear();
+            if (exception is not IOException) AtomicXmlFile.Quarantine(_path, exception);
         }
     }
 

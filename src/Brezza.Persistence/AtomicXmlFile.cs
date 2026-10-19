@@ -14,10 +14,41 @@ internal static class AtomicXmlFile
             using var stream = File.OpenRead(path);
             return new XmlSerializer(typeof(T)).Deserialize(stream) as T;
         }
-        catch (Exception exception) when (
-            exception is IOException || exception is InvalidOperationException || exception is ArgumentException)
+        catch (IOException)
         {
+            // A file that is temporarily unreadable (another process holds it) is not corrupt:
+            // leave it in place so the next load can read it instead of destroying it.
             return null;
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException || exception is ArgumentException)
+        {
+            Quarantine(path, exception);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Moves a file the serializer cannot read out of the way, so a later save cannot silently
+    /// overwrite the only copy of the user's data. Best effort: a failed move is reported and the
+    /// original remains where it was.
+    /// </summary>
+    internal static void Quarantine(string path, Exception exception)
+    {
+        var quarantinePath = path + ".corrupt-" + DateTime.UtcNow.Ticks;
+        try
+        {
+            File.Move(path, quarantinePath);
+            System.Diagnostics.Trace.TraceWarning(
+                "A corrupt data file was moved aside: {0} -> {1} ({2})",
+                path, quarantinePath, exception.Message);
+        }
+        catch (Exception moveException) when (
+            moveException is IOException || moveException is UnauthorizedAccessException)
+        {
+            System.Diagnostics.Trace.TraceError(
+                "A corrupt data file could not be moved aside: {0} ({1})",
+                path, moveException.Message);
         }
     }
 

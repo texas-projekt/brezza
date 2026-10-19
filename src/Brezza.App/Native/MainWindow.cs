@@ -147,6 +147,9 @@ internal sealed class MainWindow : IDisposable
     private int _tabMaxScroll;
     private bool _tabStripScrollable;
     private string _currentUrl = string.Empty;
+    private string? _activeTabId;
+    private bool _addressEdited;
+    private bool _updatingAddressText;
     private bool _noticeVisible;
     private bool _bookmarked;
     private bool _startPageVisible;
@@ -175,6 +178,7 @@ internal sealed class MainWindow : IDisposable
     // ---------- Intents raised by native controls ----------
 
     public event EventHandler? CloseRequested;
+    public event EventHandler? SessionEndingRequested;
     public event EventHandler<string>? NavigateRequested;
     public event EventHandler<string>? ActivateTabRequested;
     public event EventHandler<string>? CloseTabRequested;
@@ -243,12 +247,28 @@ internal sealed class MainWindow : IDisposable
         // Start from the DPI of the monitor the window landed on; WM_DPICHANGED keeps it current.
         var windowDpi = NativeMethods.GetDpiForWindow(_hwnd);
         if (windowDpi > 0) _dpi = windowDpi;
+
+        // CreateWindowEx takes physical pixels. Resize to the intended logical 1120x760 before the
+        // first Show, so 125%/150% displays do not open a visibly smaller window.
+        if (_dpi != NativeMethods.USER_DEFAULT_SCREEN_DPI)
+        {
+            NativeMethods.SetWindowPos(
+                _hwnd,
+                IntPtr.Zero,
+                0,
+                0,
+                Scale(1120),
+                Scale(760),
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
+        }
+
         ApplyFonts();
         RepaintTheme();
 
         // WM_CREATE runs before CreateWindowEx returns the top-level HWND, so the first
         // language pass is intentionally guarded. Apply it again once all handles exist.
         ApplyLanguage();
+        DialogKeyboard.Register(_hwnd, tabOnly: true);
     }
 
     public void Show()
@@ -260,8 +280,16 @@ internal sealed class MainWindow : IDisposable
 
     public int RunMessageLoop()
     {
-        while (NativeMethods.GetMessage(out var message, IntPtr.Zero, 0, 0) > 0)
+        while (true)
         {
+            var result = NativeMethods.GetMessage(out var message, IntPtr.Zero, 0, 0);
+            if (result == 0) return 0;
+            if (result == -1)
+            {
+                Trace.TraceError("The browser message loop could not read a message (error {0}).", Marshal.GetLastWin32Error());
+                return 1;
+            }
+
             if (IsKeyDown(message.message) && FlatPopup.Current is { } popup &&
                 popup.TryHandleKey(NativeMethods.GetLoWord(message.wParam))) continue;
             if (TryHandleKey(message.message, message.wParam, message.lParam)) continue;
@@ -269,8 +297,6 @@ internal sealed class MainWindow : IDisposable
             NativeMethods.TranslateMessage(ref message);
             NativeMethods.DispatchMessage(ref message);
         }
-
-        return 0;
     }
 
     /// <summary>Destroys the window after the shell finished its asynchronous shutdown.</summary>
@@ -279,11 +305,15 @@ internal sealed class MainWindow : IDisposable
         if (_hwnd == IntPtr.Zero) return;
         _shutdownCompleted = true;
         NativeMethods.KillTimer(_hwnd, new IntPtr(ShutdownGuardTimerId));
-        NativeMethods.DestroyWindow(_hwnd);
+        var window = _hwnd;
+        _hwnd = IntPtr.Zero;
+        NativeMethods.DestroyWindow(window);
     }
 
     public void Dispose()
     {
+        DialogKeyboard.Unregister(_hwnd);
+
         if (_tabStrip != IntPtr.Zero)
         {
             NativeMethods.RemoveWindowSubclass(_tabStrip, _tabStripSubClass, new UIntPtr(1));
@@ -374,6 +404,14 @@ internal sealed class MainWindow : IDisposable
     {
         if (_hwnd == IntPtr.Zero || _tabStrip == IntPtr.Zero) return;
 
+        // A switch to another tab discards an unsubmitted address draft: the field must show the
+        // new tab's address, not text the user was typing for the previous one.
+        if (!string.Equals(_activeTabId, activeTabId, StringComparison.Ordinal))
+        {
+            _activeTabId = activeTabId;
+            _addressEdited = false;
+        }
+
         var desired = tabs
             .Select(tab => (tab.Id, Text: TabText(tab, tab.Id == activeTabId && activeLoading),
                 Private: tab.SessionKind == BrowserSessionKind.Private))
@@ -411,11 +449,25 @@ internal sealed class MainWindow : IDisposable
             _tabMirror.Clear();
             _tabMirror.AddRange(desired);
 
-            var activeIndex = tabs.Select((tab, index) => (tab, index)).FirstOrDefault(pair => pair.tab.Id == activeTabId).index;
-            // Scroll to the new active tab before the selection moves, so the control's own repaint of
-            // the new selection and the strip's repaint at the new offset are one paint.
-            ScrollTabIntoView(activeIndex);
-            NativeMethods.SendMessage(_tabStrip, NativeMethods.TCM_SETCURSEL, new IntPtr(activeIndex), IntPtr.Zero);
+            var activeIndex = -1;
+            for (var index = 0; index < tabs.Count; index++)
+            {
+                if (string.Equals(tabs[index].Id, activeTabId, StringComparison.Ordinal))
+                {
+                    activeIndex = index;
+                    break;
+                }
+            }
+
+            // A missing active id means the shell's state is changing; do not silently select the
+            // first tab and make the native view disagree with Core.
+            if (activeIndex >= 0)
+            {
+                // Scroll to the new active tab before the selection moves, so the control's own
+                // repaint of the new selection and the strip's repaint at the new offset are one paint.
+                ScrollTabIntoView(activeIndex);
+                NativeMethods.SendMessage(_tabStrip, NativeMethods.TCM_SETCURSEL, new IntPtr(activeIndex), IntPtr.Zero);
+            }
         }
         finally
         {
@@ -460,8 +512,25 @@ internal sealed class MainWindow : IDisposable
     public void SetAddressText(string? text)
     {
         _currentUrl = text ?? string.Empty;
-        if (_hwnd == IntPtr.Zero) return;
-        NativeMethods.SetWindowText(_addressCombo, _currentUrl);
+        if (_hwnd == IntPtr.Zero || _addressEdited) return;
+        SetAddressTextCore(_currentUrl);
+    }
+
+    /// <summary>
+    /// Writes the address field without treating the change as user input. Programmatic
+    /// <c>SetWindowText</c> also raises the edit notifications that mark a draft dirty.
+    /// </summary>
+    private void SetAddressTextCore(string text)
+    {
+        _updatingAddressText = true;
+        try
+        {
+            NativeMethods.SetWindowText(_addressCombo, text);
+        }
+        finally
+        {
+            _updatingAddressText = false;
+        }
     }
 
     public void SetWindowTitle(string title)
@@ -611,7 +680,18 @@ internal sealed class MainWindow : IDisposable
             switch (msg)
             {
                 case NativeMethods.WM_CREATE:
-                    CreateControls(hWnd);
+                    try
+                    {
+                        CreateControls(hWnd);
+                    }
+                    catch (Exception exception)
+                    {
+                        // A half-created window is worse than no window: abort creation so Create()
+                        // reports the failure instead of leaving missing controls behind.
+                        Trace.TraceError("The browser controls could not be created: {0}", exception);
+                        return new IntPtr(-1);
+                    }
+
                     return IntPtr.Zero;
 
                 case NativeMethods.WM_NCCALCSIZE when wParam != IntPtr.Zero:
@@ -666,7 +746,17 @@ internal sealed class MainWindow : IDisposable
                     return IntPtr.Zero;
 
                 case NativeMethods.WM_TIMER:
-                    TimerTick?.Invoke(this, NativeMethods.GetLoWord(wParam));
+                    var timerId = NativeMethods.GetLoWord(wParam);
+                    if (timerId == ShutdownGuardTimerId)
+                    {
+                        // Shutdown is asynchronous, but a shell that never completes it must not leave
+                        // a window that cannot be closed.
+                        Trace.TraceWarning("The browser did not finish shutting down; forcing the window closed.");
+                        CompleteShutdown();
+                        return IntPtr.Zero;
+                    }
+
+                    TimerTick?.Invoke(this, timerId);
                     return IntPtr.Zero;
 
                 case NativeMethods.WM_CTLCOLORSTATIC:
@@ -684,6 +774,12 @@ internal sealed class MainWindow : IDisposable
                 case NativeMethods.WM_CLOSE:
                     OnClose();
                     return IntPtr.Zero;
+
+                case NativeMethods.WM_QUERYENDSESSION:
+                    // Windows is ending the session and will not wait for asynchronous shutdown.
+                    // Save synchronously; the default answer keeps the browser from blocking logoff.
+                    SessionEndingRequested?.Invoke(this, EventArgs.Empty);
+                    return new IntPtr(1);
 
                 case NativeMethods.WM_DESTROY:
                     NativeMethods.PostQuitMessage(0);
@@ -1265,8 +1361,13 @@ internal sealed class MainWindow : IDisposable
         // The system owns the region handle once it is set, so a fresh one is built each time. The
         // redraw flag is left off: the caller invalidates once, after the strip is in its final
         // place, so the strip is never painted at the new offset under the old region.
-        NativeMethods.SetWindowRgn(_tabStrip,
-            NativeMethods.CreateRectRgn(left, 0, right, Scale(CaptionHeight - TabTop)), false);
+        var region = NativeMethods.CreateRectRgn(left, 0, right, Scale(CaptionHeight - TabTop));
+        if (NativeMethods.SetWindowRgn(_tabStrip, region, false) == 0)
+        {
+            // SetWindowRgn only takes ownership of the region when it succeeds.
+            NativeMethods.DeleteObject(region);
+        }
+
         if (!repaintNeighbours) return;
         NativeMethods.InvalidateRect(_newTabButton, IntPtr.Zero, false);
         NativeMethods.InvalidateRect(_titleMinimize, IntPtr.Zero, false);
@@ -1551,6 +1652,21 @@ internal sealed class MainWindow : IDisposable
 
     private IntPtr OnTabStripMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, IntPtr id, IntPtr data)
     {
+        try
+        {
+            return OnTabStripMessageCore(hWnd, msg, wParam, lParam);
+        }
+        catch (Exception exception)
+        {
+            // The tab strip is a system control; an exception must not escape its subclass.
+            Trace.TraceError("The tab strip message {0} failed: {1}", msg, exception);
+        }
+
+        return NativeMethods.DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    private IntPtr OnTabStripMessageCore(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
         switch (msg)
         {
             case NativeMethods.WM_ERASEBKGND:
@@ -1624,18 +1740,28 @@ internal sealed class MainWindow : IDisposable
         var current = SelectedTabIndex;
         var next = current + step;
         if (next < 0 || next >= _tabMirror.Count) return;
-        // Scroll first, then move the selection. The control repaints for a selection change on its
-        // own, so this order makes that repaint and the strip's repaint at the new offset one paint;
-        // the other order paints the row twice per wheel step, once still at the old offset.
-        ScrollTabIntoView(next);
-        NativeMethods.SendMessage(_tabStrip, NativeMethods.TCM_SETCURSEL, new IntPtr(next), IntPtr.Zero);
-        // Programmatic TCM_SETCURSEL does not emit TCN_SELCHANGE. Keep Core's active tab
-        // synchronized when the user changes tabs with the wheel, and bring the new tab into view.
-        PositionTabClose();
+
+        // Ask Core to activate the tab and let the next state render move the native selection.
+        // Moving the selection first would make the view show a tab Core never accepted (for
+        // example one that is closing).
         ActivateTabRequested?.Invoke(this, _tabMirror[next].Id);
     }
 
     private IntPtr OnAddressEditMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, IntPtr id, IntPtr data)
+    {
+        try
+        {
+            return OnAddressEditMessageCore(hWnd, msg, wParam, lParam);
+        }
+        catch (Exception exception)
+        {
+            Trace.TraceError("The address edit message {0} failed: {1}", msg, exception);
+        }
+
+        return NativeMethods.DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    private IntPtr OnAddressEditMessageCore(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
         switch (msg)
         {
@@ -1665,12 +1791,18 @@ internal sealed class MainWindow : IDisposable
     private void SubmitAddress()
     {
         var text = NativeMethods.GetWindowText(_addressCombo);
-        if (!string.IsNullOrWhiteSpace(text)) NavigateRequested?.Invoke(this, text);
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            // The field now represents the committed address, so later state renders may update it.
+            _addressEdited = false;
+            NavigateRequested?.Invoke(this, text);
+        }
     }
 
     private void RevertAddress()
     {
-        NativeMethods.SetWindowText(_addressCombo, _currentUrl);
+        _addressEdited = false;
+        SetAddressTextCore(_currentUrl);
         NativeMethods.SendMessage(
             _addressEdit != IntPtr.Zero ? _addressEdit : _addressCombo,
             NativeMethods.EM_SETSEL,
@@ -1702,8 +1834,16 @@ internal sealed class MainWindow : IDisposable
                 if (selected >= 0)
                 {
                     var text = NativeMethods.GetComboItemText(control, selected);
-                    if (!string.IsNullOrWhiteSpace(text)) NavigateRequested?.Invoke(this, text);
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        _addressEdited = false;
+                        NavigateRequested?.Invoke(this, text);
+                    }
                 }
+            }
+            else if (notification == NativeMethods.CBN_EDITCHANGE || notification == NativeMethods.EN_CHANGE)
+            {
+                if (!_updatingAddressText) _addressEdited = true;
             }
             else if (notification == NativeMethods.CBN_DROPDOWN)
             {
@@ -1816,21 +1956,33 @@ internal sealed class MainWindow : IDisposable
     private static bool IsPaletteChange(IntPtr lParam)
     {
         var section = lParam == IntPtr.Zero ? null : Marshal.PtrToStringUni(lParam);
-        return string.Equals(section, "ImmersiveColorSet", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(section, "ImmersiveColorSet", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(section, "Accessibility", StringComparison.OrdinalIgnoreCase);
     }
 
     private void PopulateAddressSuggestions()
     {
         var suggestions = AddressSuggestionsProvider?.Invoke();
         if (suggestions is null) return;
-        NativeMethods.SendMessage(_addressCombo, NativeMethods.CB_RESETCONTENT, IntPtr.Zero, IntPtr.Zero);
-        foreach (var suggestion in suggestions)
-        {
-            NativeMethods.SendMessage(_addressCombo, NativeMethods.CB_ADDSTRING, IntPtr.Zero, suggestion);
-        }
 
-        // Resetting the list clears the edit text; keep what the user sees.
-        NativeMethods.SetWindowText(_addressCombo, _currentUrl);
+        // Resetting the list clears the edit text; restore what the user has typed, not the last
+        // committed URL. Otherwise opening the drop-down erases an in-progress address.
+        var draft = NativeMethods.GetWindowText(_addressCombo);
+        _updatingAddressText = true;
+        try
+        {
+            NativeMethods.SendMessage(_addressCombo, NativeMethods.CB_RESETCONTENT, IntPtr.Zero, IntPtr.Zero);
+            foreach (var suggestion in suggestions)
+            {
+                NativeMethods.SendMessage(_addressCombo, NativeMethods.CB_ADDSTRING, IntPtr.Zero, suggestion);
+            }
+
+            NativeMethods.SetWindowText(_addressCombo, draft);
+        }
+        finally
+        {
+            _updatingAddressText = false;
+        }
     }
 
     private void OnNotify(IntPtr lParam)

@@ -66,10 +66,65 @@ if (-not [string]::IsNullOrWhiteSpace($PackageVersion)) { $packageArgs['Version'
 if ($SkipLaunchVerification) { $packageArgs['SkipLaunchVerification'] = $true }
 
 if ($Stage -in 'All', 'Unit') {
+    Write-Host '==> Language packs' -ForegroundColor Cyan
+    $localeRoot = Join-Path $projectRoot 'src\Brezza.App\BrowserUi\locales'
+    $packs = @{}
+    foreach ($name in @('en', 'zh-Hans', 'zh-Hant')) {
+        $path = Join-Path $localeRoot ($name + '.json')
+        if (-not (Test-Path -LiteralPath $path)) { throw "Language pack $name.json is missing." }
+        $parsed = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        $hash = @{}
+        foreach ($property in $parsed.PSObject.Properties) { $hash[$property.Name] = $property.Value }
+        $packs[$name] = $hash
+    }
+    $referenceKeys = @($packs['en'].Keys | Sort-Object)
+    foreach ($name in @('zh-Hans', 'zh-Hant')) {
+        $keys = @($packs[$name].Keys | Sort-Object)
+        $missing = @($referenceKeys | Where-Object { -not $packs[$name].ContainsKey($_) })
+        $extra = @($keys | Where-Object { -not $packs['en'].ContainsKey($_) })
+        if ($missing.Count -gt 0) { throw "$name.json is missing: $($missing -join ', ')" }
+        if ($extra.Count -gt 0) { throw "$name.json has unknown keys: $($extra -join ', ')" }
+        foreach ($key in $referenceKeys) {
+            $referencePlaceholders = @([regex]::Matches([string]$packs['en'][$key], '\{[A-Za-z]+\}') | ForEach-Object Value | Sort-Object)
+            $translatedPlaceholders = @([regex]::Matches([string]$packs[$name][$key], '\{[A-Za-z]+\}') | ForEach-Object Value | Sort-Object)
+            if (($referencePlaceholders -join ',') -ne ($translatedPlaceholders -join ',')) {
+                throw "$name.json has different placeholders for '$key'."
+            }
+        }
+    }
+
     Write-Host '==> Unit tests' -ForegroundColor Cyan
+    $coverageStart = (Get-Date).AddSeconds(-2)
     & dotnet test (Join-Path $projectRoot 'tests\Brezza.Core.Tests') -c $Configuration `
+        --collect:"XPlat Code Coverage" `
         --logger trx --results-directory $resultsRoot
     Test-NativeExit 'Unit'
+
+    # Coverage is collected per target framework. The baseline is stable above these floors; a
+    # regression below them fails the stage instead of only changing an uploaded artifact.
+    $minimumLineCoverage = 0.85
+    $minimumBranchCoverage = 0.70
+    $coverageFiles = @(Get-ChildItem -LiteralPath $resultsRoot -Recurse -Filter 'coverage.cobertura.xml' |
+        Where-Object { $_.LastWriteTime -ge $coverageStart })
+    if ($coverageFiles.Count -eq 0) { throw 'The Unit stage produced no coverage report.' }
+
+    $lineCoverage = 1.0
+    $branchCoverage = 1.0
+    foreach ($coverageFile in $coverageFiles) {
+        [xml]$coverage = Get-Content -LiteralPath $coverageFile.FullName -Raw
+        $line = [double]::Parse([string]$coverage.coverage.'line-rate', [System.Globalization.CultureInfo]::InvariantCulture)
+        $branch = [double]::Parse([string]$coverage.coverage.'branch-rate', [System.Globalization.CultureInfo]::InvariantCulture)
+        if ($line -lt $lineCoverage) { $lineCoverage = $line }
+        if ($branch -lt $branchCoverage) { $branchCoverage = $branch }
+    }
+    Write-Host ("Coverage: line {0:P1}, branch {1:P1} (floors {2:P0} / {3:P0})" -f `
+        $lineCoverage, $branchCoverage, $minimumLineCoverage, $minimumBranchCoverage)
+    if ($lineCoverage -lt $minimumLineCoverage) {
+        throw "Line coverage $($lineCoverage.ToString('P1')) is below the $($minimumLineCoverage.ToString('P0')) floor."
+    }
+    if ($branchCoverage -lt $minimumBranchCoverage) {
+        throw "Branch coverage $($branchCoverage.ToString('P1')) is below the $($minimumBranchCoverage.ToString('P0')) floor."
+    }
     $ran.Add('Unit')
 }
 

@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Brezza.Core.Abstractions;
 using Brezza.Core.Downloads;
+using Brezza.Core.Navigation;
 using Brezza.Core.Permissions;
 using Microsoft.Web.WebView2.Core;
 namespace Brezza.WebView2;
@@ -20,22 +21,26 @@ public sealed class WebView2TabHost : ITabHost
     private readonly IntPtr _parentWindow;
     private readonly CoreWebView2ControllerOptions _controllerOptions;
     private readonly Func<string> _downloadsFolder;
+    private readonly DownloadRequestLimiter _downloadLimiter;
 
     // The downloads this host is running, by the file each writes to. A command from the panel
     // reaches the operation through this map, so it works whatever tab is active.
     private readonly Dictionary<string, CoreWebView2DownloadOperation> _downloads = new(StringComparer.OrdinalIgnoreCase);
-    private readonly TaskCompletionSource<CoreWebView2Controller> _controllerCreation =
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource<CoreWebView2Controller> _controllerCreation = NewControllerCreation();
     private readonly SemaphoreSlim _navigationGate = new(1, 1);
     private TaskCompletionSource<bool>? _pendingNavigation;
     private CoreWebView2Controller? _controller;
     private Task<CoreWebView2Controller>? _creationTask;
     private bool _disposed;
     private bool _isLoading;
+    private string _lastSource = string.Empty;
+    private string _lastTitle = string.Empty;
 
     // The id of the navigation that started last. A navigation that completes with another id was
     // replaced by a newer one while it was loading.
     private ulong _latestNavigationId;
+    private ulong _blockedExternalSchemeNavigationId;
+    private bool _externalSchemeBlocked;
     private readonly string _hostId = "host-" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
     // The shell positions and shows a host as soon as it becomes active, which is usually before the
@@ -58,7 +63,8 @@ public sealed class WebView2TabHost : ITabHost
         CoreWebView2Environment environment,
         IntPtr parentWindow,
         CoreWebView2ControllerOptions controllerOptions,
-        Func<string>? downloadsFolder = null)
+        Func<string>? downloadsFolder = null,
+        DownloadRequestLimiter? downloadLimiter = null)
     {
         _environment = environment ?? throw new ArgumentNullException(nameof(environment));
         _parentWindow = parentWindow;
@@ -66,11 +72,13 @@ public sealed class WebView2TabHost : ITabHost
         // The folder is resolved per download rather than captured, so a folder the user picked
         // later in settings applies to every host, not only the ones created afterwards.
         _downloadsFolder = downloadsFolder ?? (() => string.Empty);
+        // Every host in the browser shares one limiter, so the cap applies across tabs.
+        _downloadLimiter = downloadLimiter ?? new DownloadRequestLimiter();
     }
 
-    public string Source => _controller?.CoreWebView2?.Source ?? string.Empty;
+    public string Source => _controller?.CoreWebView2?.Source ?? _lastSource;
 
-    public string Title => _controller?.CoreWebView2?.DocumentTitle ?? string.Empty;
+    public string Title => _controller?.CoreWebView2?.DocumentTitle ?? _lastTitle;
 
     /// <summary>The favicon URI the document reported, or empty when it has none.</summary>
     public string FaviconUri => _controller?.CoreWebView2?.FaviconUri ?? string.Empty;
@@ -85,6 +93,10 @@ public sealed class WebView2TabHost : ITabHost
 
     public bool ContainsFullScreenElement => _controller?.CoreWebView2?.ContainsFullScreenElement ?? false;
 
+    public bool HasActiveDownload => !_disposed && _downloads.Count > 0;
+
+    public bool HasContent => !_disposed && _controller is not null;
+
     public event EventHandler? SourceChanged;
 
     public event EventHandler? TitleChanged;
@@ -93,14 +105,19 @@ public sealed class WebView2TabHost : ITabHost
 
     public event EventHandler? ProcessFailed;
 
-    public event EventHandler? NavigationFailed;
+    public event EventHandler<TabNavigationFailedEventArgs>? NavigationFailed;
 
     public event EventHandler<TabNavigationResultEventArgs>? NavigationCompleted;
 
     /// <summary>A page asked the browser to open a new window.</summary>
     public event EventHandler<PopupRequestedEventArgs>? PopupRequested;
 
+    /// <summary>A page requested an external URI scheme the browser refused to launch.</summary>
+    public event EventHandler<ExternalSchemeBlockedEventArgs>? ExternalSchemeBlocked;
+
     public event EventHandler<DownloadStartedEventArgs>? DownloadStarted;
+
+    public event EventHandler<DownloadBlockedEventArgs>? DownloadBlocked;
 
     public event EventHandler<DownloadStatusChangedEventArgs>? DownloadStatusChanged;
 
@@ -112,9 +129,10 @@ public sealed class WebView2TabHost : ITabHost
         CoreWebView2Environment environment,
         IntPtr parentWindow,
         CoreWebView2ControllerOptions controllerOptions,
-        Func<string>? downloadsFolder = null)
+        Func<string>? downloadsFolder = null,
+        DownloadRequestLimiter? downloadLimiter = null)
     {
-        var host = new WebView2TabHost(environment, parentWindow, controllerOptions, downloadsFolder);
+        var host = new WebView2TabHost(environment, parentWindow, controllerOptions, downloadsFolder, downloadLimiter);
         host.StartCreation();
         return host;
     }
@@ -202,6 +220,14 @@ public sealed class WebView2TabHost : ITabHost
     public async Task NavigateAsync(Uri uri)
     {
         ThrowIfDisposed();
+        _lastSource = uri.AbsoluteUri;
+        // A previous controller creation may have failed (a runtime restart, a transient COM
+        // failure). Give the host another chance instead of leaving it permanently unusable.
+        if (_creationTask is null || _creationTask.IsFaulted || _creationTask.IsCanceled)
+        {
+            StartCreation();
+        }
+
         var controller = await _controllerCreation.Task.ConfigureAwait(true);
         ThrowIfDisposed();
         await _navigationGate.WaitAsync().ConfigureAwait(true);
@@ -250,7 +276,30 @@ public sealed class WebView2TabHost : ITabHost
     public void Reload()
     {
         ThrowIfDisposed();
-        _controller?.CoreWebView2.Reload();
+        if (_controller is { } controller)
+        {
+            controller.CoreWebView2.Reload();
+            return;
+        }
+
+        // The controller may have been invalidated by a process failure. Reload means "bring this
+        // page back", so create a fresh controller through the normal navigation path.
+        if (Uri.TryCreate(_lastSource, UriKind.Absolute, out var uri))
+        {
+            _ = ReloadAfterFailureAsync(uri);
+        }
+    }
+
+    private async Task ReloadAfterFailureAsync(Uri uri)
+    {
+        try
+        {
+            await NavigateAsync(uri).ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            Trace.TraceWarning("Tab host {0}: the page could not be reloaded after a failure: {1}", _hostId, exception.Message);
+        }
     }
 
     /// <summary>
@@ -307,14 +356,17 @@ public sealed class WebView2TabHost : ITabHost
 
     /// <summary>
     /// Runs a script in the rendered document on behalf of the shell. This is a host-side
-    /// verification tool; remote pages receive no equivalent capability.
+    /// verification tool; remote pages receive no equivalent capability. It is compiled only in
+    /// Debug builds, so the shipped application exposes no general-purpose script entry point.
     /// </summary>
+#if DEBUG
     public Task<string> ExecuteScriptAsync(string script)
     {
         ThrowIfDisposed();
         if (_controller is null) throw new InvalidOperationException("WebView2 is not initialized.");
         return _controller.CoreWebView2.ExecuteScriptAsync(script);
     }
+#endif
 
     public void Dispose()
     {
@@ -324,12 +376,7 @@ public sealed class WebView2TabHost : ITabHost
         _pendingNavigation?.TrySetException(new ObjectDisposedException(nameof(WebView2TabHost)));
         _pendingNavigation = null;
 
-        foreach (var operation in _downloads.Values)
-        {
-            operation.StateChanged -= OnDownloadStateChanged;
-            operation.BytesReceivedChanged -= OnDownloadBytesReceived;
-        }
-
+        ReportActiveDownloadsInterrupted("TabClosed");
         _downloads.Clear();
 
         if (_controller is { } controller)
@@ -357,15 +404,23 @@ public sealed class WebView2TabHost : ITabHost
             return;
         }
 
+        // Do not replace a creation that is still running: every caller must await the same task.
+        if (_creationTask is { IsCompleted: false }) return;
+
+        _controllerCreation = NewControllerCreation();
         _creationTask = CreateControllerAsync();
     }
+
+    private static TaskCompletionSource<CoreWebView2Controller> NewControllerCreation() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private async Task<CoreWebView2Controller> CreateControllerAsync()
     {
         System.Diagnostics.Trace.TraceInformation("Tab host {0}: creating controller.", _hostId);
+        CoreWebView2Controller? controller = null;
         try
         {
-            var controller = await _environment.CreateCoreWebView2ControllerAsync(_parentWindow, _controllerOptions)
+            controller = await _environment.CreateCoreWebView2ControllerAsync(_parentWindow, _controllerOptions)
                 .ConfigureAwait(true);
             System.Diagnostics.Trace.TraceInformation("Tab host {0}: controller created.", _hostId);
             await ConfigureControllerAsync(controller).ConfigureAwait(true);
@@ -373,11 +428,38 @@ public sealed class WebView2TabHost : ITabHost
         }
         catch (Exception exception)
         {
-            // A creation failure must reach the caller: a tab that cannot render reports it instead
-            // of waiting for a controller that will never exist.
+            // A half-configured controller still owns a browser process; close it before the
+            // failure reaches the caller. The next navigation may create a fresh one.
+            if (controller is not null) CloseFailedController(controller);
+
             System.Diagnostics.Trace.TraceError("Tab host {0}: controller creation failed: {1}", _hostId, exception);
             _controllerCreation.TrySetException(exception);
+            _creationTask = null;
             throw;
+        }
+    }
+
+    private void CloseFailedController(CoreWebView2Controller controller)
+    {
+        if (ReferenceEquals(_controller, controller)) _controller = null;
+        try
+        {
+            Detach(controller);
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Trace.TraceWarning(
+                "Tab host {0}: a failed controller could not be detached: {1}", _hostId, exception.Message);
+        }
+
+        try
+        {
+            controller.Close();
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Trace.TraceWarning(
+                "Tab host {0}: a failed controller could not be closed: {1}", _hostId, exception.Message);
         }
     }
 
@@ -388,7 +470,12 @@ public sealed class WebView2TabHost : ITabHost
         core.Settings.IsWebMessageEnabled = false;
         core.Settings.AreDefaultContextMenusEnabled = true;
         core.Settings.IsStatusBarEnabled = false;
+#if DEBUG
+        // Developer tools are a development aid, not part of the shipped browser surface.
         core.Settings.AreDevToolsEnabled = true;
+#else
+        core.Settings.AreDevToolsEnabled = false;
+#endif
         // Browser accelerators (F5, Ctrl+R, ...) are handled by the native window, not the page.
         core.Settings.AreBrowserAcceleratorKeysEnabled = false;
         controller.IsVisible = false;
@@ -533,6 +620,7 @@ public sealed class WebView2TabHost : ITabHost
         core.ProcessFailed += OnProcessFailed;
         core.NavigationCompleted += OnNavigationCompleted;
         core.NewWindowRequested += OnNewWindowRequested;
+        core.LaunchingExternalUriScheme += OnLaunchingExternalUriScheme;
         core.PermissionRequested += OnPermissionRequested;
         core.DownloadStarting += OnDownloadStarting;
     }
@@ -548,6 +636,7 @@ public sealed class WebView2TabHost : ITabHost
         core.ProcessFailed -= OnProcessFailed;
         core.NavigationCompleted -= OnNavigationCompleted;
         core.NewWindowRequested -= OnNewWindowRequested;
+        core.LaunchingExternalUriScheme -= OnLaunchingExternalUriScheme;
         core.PermissionRequested -= OnPermissionRequested;
         core.DownloadStarting -= OnDownloadStarting;
 
@@ -561,11 +650,17 @@ public sealed class WebView2TabHost : ITabHost
         _downloads.Clear();
     }
 
-    private void OnSourceChanged(object? sender, CoreWebView2SourceChangedEventArgs args) =>
+    private void OnSourceChanged(object? sender, CoreWebView2SourceChangedEventArgs args)
+    {
+        _lastSource = _controller?.CoreWebView2?.Source ?? _lastSource;
         SourceChanged?.Invoke(this, EventArgs.Empty);
+    }
 
-    private void OnDocumentTitleChanged(object? sender, object args) =>
+    private void OnDocumentTitleChanged(object? sender, object args)
+    {
+        _lastTitle = _controller?.CoreWebView2?.DocumentTitle ?? _lastTitle;
         TitleChanged?.Invoke(this, EventArgs.Empty);
+    }
 
     private void OnFaviconChanged(object? sender, object args) =>
         FaviconChanged?.Invoke(this, EventArgs.Empty);
@@ -580,6 +675,8 @@ public sealed class WebView2TabHost : ITabHost
         _isLoading = true;
         _latestNavigationId = args.NavigationId;
         _navigationStartedDownload = false;
+        _blockedExternalSchemeNavigationId = 0;
+        _externalSchemeBlocked = false;
     }
 
 
@@ -592,9 +689,69 @@ public sealed class WebView2TabHost : ITabHost
 
     private void OnProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs args)
     {
+        if (_disposed) return;
         _isLoading = false;
         _pendingNavigation?.TrySetException(new InvalidOperationException("The WebView2 process failed during navigation."));
+        _pendingNavigation = null;
+
+        // The controller belongs to a dead browser process. Drop it so the next navigation (or the
+        // notice's Reload action) creates a fresh one, and report its downloads as interrupted.
+        ReportActiveDownloadsInterrupted("ProcessFailed");
+        var controller = _controller;
+        _controller = null;
+        _creationTask = null;
+        if (controller is not null)
+        {
+            try
+            {
+                Detach(controller);
+            }
+            catch (Exception exception)
+            {
+                Trace.TraceWarning("Tab host {0}: a failed controller could not be detached: {1}", _hostId, exception.Message);
+            }
+
+            try
+            {
+                controller.Close();
+            }
+            catch (Exception exception)
+            {
+                Trace.TraceWarning("Tab host {0}: a failed controller could not be closed: {1}", _hostId, exception.Message);
+            }
+        }
+
+        _downloads.Clear();
         ProcessFailed?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Reports downloads the host was running when it stopped; the operations then clear.</summary>
+    private void ReportActiveDownloadsInterrupted(string reason)
+    {
+        foreach (var operation in new System.Collections.Generic.List<CoreWebView2DownloadOperation>(_downloads.Values))
+        {
+            operation.StateChanged -= OnDownloadStateChanged;
+            operation.BytesReceivedChanged -= OnDownloadBytesReceived;
+
+            try
+            {
+                DownloadStatusChanged?.Invoke(this, new DownloadStatusChangedEventArgs(
+                    BrowserDownloadState.Interrupted,
+                    operation.ResultFilePath,
+                    operation.Uri,
+                    TotalBytesOrNull(operation),
+                    reason));
+            }
+            catch (Exception exception)
+            {
+                // A subscriber must not make host teardown fail.
+                Trace.TraceError("Tab host {0}: a download interruption could not be reported: {1}", _hostId, exception);
+            }
+            finally
+            {
+                _downloadLimiter.Release(operation.ResultFilePath);
+            }
+        }
     }
 
     private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs args)
@@ -633,6 +790,12 @@ public sealed class WebView2TabHost : ITabHost
 
     private void CompleteNavigation(bool isSuccess, string status, ulong navigationId)
     {
+        // Cancelling an external scheme also aborts the navigation; that is the policy doing its
+        // job, not the page failing.
+        var blockedExternalScheme = !isSuccess &&
+            (_externalSchemeBlocked || (navigationId != 0 && navigationId == _blockedExternalSchemeNavigationId));
+        if (blockedExternalScheme) _externalSchemeBlocked = false;
+
         var superseded = !isSuccess && navigationId != _latestNavigationId;
 
         // A navigation that started a download is aborted by the runtime with ConnectionAborted
@@ -642,8 +805,11 @@ public sealed class WebView2TabHost : ITabHost
 
         // Only the latest navigation decides whether the page is still loading.
         if (!superseded) _isLoading = false;
-        NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(isSuccess, status, superseded, replacedByDownload));
-        if (!isSuccess && !superseded && !replacedByDownload) NavigationFailed?.Invoke(this, EventArgs.Empty);
+        NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(isSuccess, status, superseded || blockedExternalScheme, replacedByDownload, navigationId));
+        if (!isSuccess && !superseded && !replacedByDownload && !blockedExternalScheme)
+        {
+            NavigationFailed?.Invoke(this, new TabNavigationFailedEventArgs(navigationId, status));
+        }
     }
 
     // Long enough for a navigation the page started right after aborting the previous one to raise
@@ -654,7 +820,19 @@ public sealed class WebView2TabHost : ITabHost
     {
         // A popup becomes an ordinary new tab; the shell never opens a second window on its own.
         args.Handled = true;
-        PopupRequested?.Invoke(this, new PopupRequestedEventArgs(args.Uri));
+        PopupRequested?.Invoke(this, new PopupRequestedEventArgs(args.Uri, isUserInitiated: args.IsUserInitiated));
+    }
+
+    private void OnLaunchingExternalUriScheme(object? sender, CoreWebView2LaunchingExternalUriSchemeEventArgs args)
+    {
+        if (ExternalSchemePolicy.IsAllowed(args.Uri, args.IsUserInitiated)) return;
+
+        // Script-initiated or unknown custom schemes must not launch an application. The runtime
+        // reports the aborted navigation as ConnectionAborted; it is not a page failure.
+        args.Cancel = true;
+        _externalSchemeBlocked = true;
+        _blockedExternalSchemeNavigationId = _latestNavigationId;
+        ExternalSchemeBlocked?.Invoke(this, new ExternalSchemeBlockedEventArgs(args.Uri, args.InitiatingOrigin));
     }
 
     private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs args)
@@ -675,16 +853,38 @@ public sealed class WebView2TabHost : ITabHost
         _navigationStartedDownload = true;
         var suggested = BrowserDownloadPaths.SuggestedFileNameFrom(operation.ContentDisposition, operation.Uri);
         var target = BrowserDownloadPaths.ResolveTargetPath(_downloadsFolder(), suggested, File.Exists);
-        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        operation.StateChanged += OnDownloadStateChanged;
-        operation.BytesReceivedChanged += OnDownloadBytesReceived;
-        // The download is tracked by the file it writes to, so a command from the panel finds the
-        // operation that owns it whatever tab is active.
-        _downloads[target] = operation;
-        args.ResultFilePath = target;
-        // Handling the event keeps the runtime's own download dialog out of the shell.
-        args.Handled = true;
-        DownloadStarted?.Invoke(this, new DownloadStartedEventArgs(operation.Uri, suggested, operation.MimeType, target));
+        var reportedTotal = operation.TotalBytesToReceive;
+        var totalBytes = reportedTotal > 0 && reportedTotal <= long.MaxValue ? (long?)reportedTotal : null;
+        var decision = _downloadLimiter.TryAcquire(target, totalBytes);
+        if (!decision.IsAllowed)
+        {
+            // Cancelling before the runtime creates the file keeps the quota refusal free of
+            // partial files, and the notice explains why nothing started.
+            args.Cancel = true;
+            args.Handled = true;
+            DownloadBlocked?.Invoke(this, new DownloadBlockedEventArgs(
+                operation.Uri, suggested, decision.Reason ?? DownloadBlockReason.TooManyConcurrent, totalBytes));
+            return;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            operation.StateChanged += OnDownloadStateChanged;
+            operation.BytesReceivedChanged += OnDownloadBytesReceived;
+            // The download is tracked by the file it writes to, so a command from the panel finds
+            // the operation that owns it whatever tab is active.
+            _downloads[target] = operation;
+            args.ResultFilePath = target;
+            // Handling the event keeps the runtime's own download dialog out of the shell.
+            args.Handled = true;
+            DownloadStarted?.Invoke(this, new DownloadStartedEventArgs(operation.Uri, suggested, operation.MimeType, target));
+        }
+        catch
+        {
+            _downloadLimiter.Release(target);
+            throw;
+        }
     }
 
     private void OnDownloadStateChanged(object? sender, object e)
@@ -712,6 +912,7 @@ public sealed class WebView2TabHost : ITabHost
         operation.StateChanged -= OnDownloadStateChanged;
         operation.BytesReceivedChanged -= OnDownloadBytesReceived;
         _downloads.Remove(operation.ResultFilePath);
+        _downloadLimiter.Release(operation.ResultFilePath);
         DownloadStatusChanged?.Invoke(this, new DownloadStatusChangedEventArgs(
             state,
             operation.ResultFilePath,

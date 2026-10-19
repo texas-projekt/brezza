@@ -38,13 +38,18 @@ internal sealed class TabFaviconCache : IDisposable
     // replaced while it was running is dropped when it lands, so the icon always matches the URI
     // Core tracks for the tab.
     private readonly Dictionary<string, string> _loading = new(StringComparer.Ordinal);
+    // A document that genuinely has no favicon, keyed by the URI it was fetched for. Without this,
+    // every state render asks the host again for the same empty result.
+    private readonly Dictionary<string, string> _missing = new(StringComparer.Ordinal);
     private readonly Func<string, Task<Stream?>> _fetch;
+    private readonly Func<string, bool> _hasContent;
     private readonly Action _repaint;
     private bool _disposed;
 
-    public TabFaviconCache(Func<string, Task<Stream?>> fetch, Action repaint)
+    public TabFaviconCache(Func<string, Task<Stream?>> fetch, Func<string, bool> hasContent, Action repaint)
     {
         _fetch = fetch ?? throw new ArgumentNullException(nameof(fetch));
+        _hasContent = hasContent ?? throw new ArgumentNullException(nameof(hasContent));
         _repaint = repaint ?? throw new ArgumentNullException(nameof(repaint));
     }
 
@@ -70,6 +75,7 @@ internal sealed class TabFaviconCache : IDisposable
             {
                 // A document without a favicon shows no icon, and the previous page's is gone.
                 if (_icons.Remove(tab.Id)) cleared = true;
+                _missing.Remove(tab.Id);
                 continue;
             }
 
@@ -85,6 +91,16 @@ internal sealed class TabFaviconCache : IDisposable
                 continue;
             }
 
+            if (_missing.TryGetValue(tab.Id, out var missingUri) &&
+                string.Equals(missingUri, tab.FaviconUri, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // A tab without a controller may simply not have loaded yet. Do not record that as
+            // "no favicon"; only a host that can answer may produce a negative result.
+            if (!_hasContent(tab.Id)) continue;
+
             // A URI whose image is not cached yet is fetched again on the next sync: the tab may
             // simply have had no host (new, internal, or sleeping), and one can appear later.
             _loading[tab.Id] = tab.FaviconUri;
@@ -97,6 +113,13 @@ internal sealed class TabFaviconCache : IDisposable
             {
                 dropped.Image.Dispose();
             }
+
+            _missing.Remove(closed);
+        }
+
+        foreach (var closed in _missing.Keys.Where(id => !live.Contains(id)).ToArray())
+        {
+            _missing.Remove(closed);
         }
 
         if (cleared) _repaint();
@@ -134,10 +157,20 @@ internal sealed class TabFaviconCache : IDisposable
                 return;
             }
 
-            // No image yet: keep the URI unfetched, so a later render tries again once the tab has
-            // a host that can produce one.
-            if (image is null) return;
+            // No image yet: remember that this document has no favicon, so ordinary state renders
+            // do not ask the host again. A different URI clears the negative entry in Sync.
+            if (image is null)
+            {
+                if (_loading.TryGetValue(tabId, out current) &&
+                    string.Equals(current, uri, StringComparison.OrdinalIgnoreCase))
+                {
+                    _missing[tabId] = uri;
+                }
 
+                return;
+            }
+
+            _missing.Remove(tabId);
             if (_icons.TryGetValue(tabId, out var previous) && _icons.Remove(tabId))
             {
                 previous.Image.Dispose();
@@ -167,5 +200,6 @@ internal sealed class TabFaviconCache : IDisposable
         _disposed = true;
         foreach (var icon in _icons.Values) icon.Image.Dispose();
         _icons.Clear();
+        _missing.Clear();
     }
 }

@@ -138,6 +138,78 @@ public sealed class TabRuntimeManagerTests
     }
 
     [Fact]
+    public async Task An_external_scheme_block_is_reported_by_the_runtime()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        ExternalSchemeBlockedEventArgs? reported = null;
+        manager.ExternalSchemeBlocked += (_, args) => reported = args;
+        var activating = manager.ActivateAsync(tab.Id);
+        var host = factory.Complete();
+        await activating;
+
+        host.RaiseExternalSchemeBlocked("calculator://open", "https://example.com/");
+
+        Assert.NotNull(reported);
+        Assert.Equal("calculator://open", reported!.Uri);
+        Assert.Equal("https://example.com/", reported.InitiatingOrigin);
+    }
+
+    [Fact]
+    public async Task A_process_failure_marks_the_tab_failed_and_a_later_success_recovers_it()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var activating = manager.ActivateAsync(tab.Id);
+        var host = factory.Complete();
+        await activating;
+
+        host.RaiseProcessFailure();
+        Assert.Equal(TabRuntimeState.Failed, registry.Find(tab.Id).State);
+
+        host.RaiseNavigationCompleted(true, "Success", navigationId: 4);
+        Assert.Equal(TabRuntimeState.Active, registry.Find(tab.Id).State);
+    }
+
+    [Fact]
+    public async Task A_stale_navigation_failure_does_not_mark_a_newer_success_as_failed()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var activating = manager.ActivateAsync(tab.Id);
+        var host = factory.Complete();
+        await activating;
+
+        host.RaiseNavigationCompleted(true, "Success", navigationId: 2);
+        host.RaiseNavigationFailure(navigationId: 1);
+
+        Assert.NotEqual(TabRuntimeState.Failed, registry.Find(tab.Id).State);
+    }
+
+    [Fact]
+    public async Task The_current_navigation_failure_marks_the_tab_failed()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var activating = manager.ActivateAsync(tab.Id);
+        var host = factory.Complete();
+        await activating;
+
+        host.RaiseNavigationCompleted(false, "NetworkError", navigationId: 3);
+        host.RaiseNavigationFailure(navigationId: 3);
+
+        Assert.Equal(TabRuntimeState.Failed, registry.Find(tab.Id).State);
+    }
+
+    [Fact]
     public async Task A_superseded_load_is_not_a_failure_whatever_its_status()
     {
         // A page that is replaced after it started streaming reports ConnectionAborted, which on its
@@ -358,6 +430,16 @@ public sealed class TabRuntimeManagerTests
     }
 
     [Fact]
+    public async Task Inactive_tab_with_a_running_download_is_not_released()
+    {
+        var context = await CreateTwoTabsAsync();
+        context.BackgroundHost.HasActiveDownload = true;
+
+        Assert.Equal(TabSleepOutcome.Downloading, context.Manager.SleepAsync(context.Background.Id));
+        Assert.False(context.BackgroundHost.IsDisposed);
+    }
+
+    [Fact]
     public async Task Inactive_tab_that_is_loading_is_not_released()
     {
         var context = await CreateTwoTabsAsync();
@@ -444,15 +526,15 @@ public sealed class TabRuntimeManagerTests
 
     private sealed class TwoTabs
     {
-        public required TabRuntimeManager Manager { get; init; }
+        public TabRuntimeManager Manager { get; set; } = null!;
 
-        public required BrowserTab Active { get; init; }
+        public BrowserTab Active { get; set; } = null!;
 
-        public required BrowserTab Background { get; init; }
+        public BrowserTab Background { get; set; } = null!;
 
-        public required FakeHost ActiveHost { get; init; }
+        public FakeHost ActiveHost { get; set; } = null!;
 
-        public required FakeHost BackgroundHost { get; init; }
+        public FakeHost BackgroundHost { get; set; } = null!;
     }
 
     [Fact]
@@ -615,6 +697,25 @@ public sealed class TabRuntimeManagerTests
         };
     }
 
+    [Fact]
+    public async Task Closing_a_tab_whose_host_creation_failed_still_completes()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+
+        var activating = manager.ActivateAsync(tab.Id);
+        var closing = manager.CloseAsync(tab.Id);
+        factory.Fail(new InvalidOperationException("The controller could not be created."));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await activating);
+        await closing;
+
+        Assert.False(registry.Contains(tab.Id));
+        Assert.Null(manager.ActiveHost);
+    }
+
     private static async Task<FakeHost> ActivateWithHostAsync(TabRuntimeManager manager, DelayedFactory factory, string tabId)
     {
         var activating = manager.ActivateAsync(tabId);
@@ -669,6 +770,11 @@ public sealed class TabRuntimeManagerTests
             if (_pending.Count > 0) _pending.Dequeue().TrySetResult(host);
             return host;
         }
+
+        public void Fail(Exception exception)
+        {
+            if (_pending.Count > 0) _pending.Dequeue().TrySetException(exception);
+        }
     }
 
     private sealed class FakeHost : ITabHost
@@ -692,6 +798,10 @@ public sealed class TabRuntimeManagerTests
 
         public bool ContainsFullScreenElement { get; set; }
 
+        public bool HasActiveDownload { get; set; }
+
+        public bool HasContent { get; set; } = true;
+
         public bool IsDisposed { get; private set; }
 
         public bool IsVisible { get; private set; }
@@ -712,13 +822,19 @@ public sealed class TabRuntimeManagerTests
 
         public event EventHandler? ProcessFailed;
 
-        public event EventHandler? NavigationFailed;
+        public event EventHandler<TabNavigationFailedEventArgs>? NavigationFailed;
 
         public event EventHandler<TabNavigationResultEventArgs>? NavigationCompleted;
 
         public event EventHandler<PopupRequestedEventArgs>? PopupRequested;
 
+        public event EventHandler<ExternalSchemeBlockedEventArgs>? ExternalSchemeBlocked;
+
         public event EventHandler<DownloadStartedEventArgs>? DownloadStarted;
+
+#pragma warning disable CS0067
+        public event EventHandler<DownloadBlockedEventArgs>? DownloadBlocked;
+#pragma warning restore CS0067
 
         public event EventHandler<DownloadStatusChangedEventArgs>? DownloadStatusChanged;
 
@@ -795,12 +911,16 @@ public sealed class TabRuntimeManagerTests
 
         public void RaiseProcessFailure() => ProcessFailed?.Invoke(this, EventArgs.Empty);
 
-        public void RaiseNavigationFailure() => NavigationFailed?.Invoke(this, EventArgs.Empty);
+        public void RaiseNavigationFailure(ulong navigationId = 0) =>
+            NavigationFailed?.Invoke(this, new TabNavigationFailedEventArgs(navigationId, "Error"));
 
-        public void RaiseNavigationCompleted(bool success, string status, bool superseded = false, bool replacedByDownload = false) =>
-            NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(success, status, superseded, replacedByDownload));
+        public void RaiseNavigationCompleted(bool success, string status, bool superseded = false, bool replacedByDownload = false, ulong navigationId = 0) =>
+            NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(success, status, superseded, replacedByDownload, navigationId));
 
         public void RaisePopup(string? targetUrl) => PopupRequested?.Invoke(this, new PopupRequestedEventArgs(targetUrl));
+
+        public void RaiseExternalSchemeBlocked(string uri, string origin) =>
+            ExternalSchemeBlocked?.Invoke(this, new ExternalSchemeBlockedEventArgs(uri, origin));
 
         public void RaiseDownloadStarted(string sourceUrl, string fileName, string targetPath) =>
             DownloadStarted?.Invoke(this, new DownloadStartedEventArgs(sourceUrl, fileName, "application/octet-stream", targetPath));

@@ -39,7 +39,20 @@ internal static class NativeMethods
     internal const uint SW_HIDE = 0;
 
     internal const int COLOR_WINDOW = 5;
+    internal const int COLOR_WINDOWFRAME = 6;
+    internal const int COLOR_WINDOWTEXT = 8;
+    internal const int COLOR_3DSHADOW = 16;
+    internal const int COLOR_GRAYTEXT = 17;
+    internal const int COLOR_BTNTEXT = 18;
     internal const int COLOR_BTNFACE = 15;
+    internal const int COLOR_HIGHLIGHT = 13;
+    internal const int COLOR_HIGHLIGHTTEXT = 14;
+    internal const int COLOR_INFOTEXT = 23;
+    internal const int COLOR_INFOBK = 24;
+    internal const int COLOR_HOTLIGHT = 26;
+
+    internal const uint SPI_GETHIGHCONTRAST = 0x0042;
+    internal const uint HCF_HIGHCONTRASTON = 0x00000001;
 
     // ---------- Messages ----------
     internal const uint WM_CREATE = 0x0001;
@@ -48,6 +61,7 @@ internal static class NativeMethods
     internal const uint WM_SIZE = 0x0005;
     internal const uint WM_PAINT = 0x000F;
     internal const uint WM_CLOSE = 0x0010;
+    internal const uint WM_QUERYENDSESSION = 0x0011;
     internal const uint WM_ERASEBKGND = 0x0014;
     internal const uint BM_CLICK = 0x00F5;
     internal const uint WM_SETTINGCHANGE = 0x001A;
@@ -797,6 +811,20 @@ internal static class NativeMethods
 
     [DllImport(User32)]
     internal static extern int GetDlgCtrlID(IntPtr hWnd);
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct HIGHCONTRAST
+    {
+        internal uint cbSize;
+        internal uint dwFlags;
+        internal IntPtr lpszDefaultScheme;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref HIGHCONTRAST pvParam, uint fWinIni);
+
+    [DllImport("user32.dll")]
+    internal static extern uint GetSysColor(int nIndex);
 
     [DllImport(User32)]
     internal static extern bool IsDialogMessage(IntPtr dialog, ref MSG message);

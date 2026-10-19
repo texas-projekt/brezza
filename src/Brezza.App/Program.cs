@@ -25,6 +25,15 @@ internal static class Program
                 System.Diagnostics.Trace.AutoFlush = true;
             }
 
+            // A second launch activates the window that already owns the browser profiles. It
+            // must not create another WebView2 user-data tree or another private-session owner.
+            using var singleInstance = new SingleInstance();
+            if (!singleInstance.TryAcquire())
+            {
+                SingleInstance.ActivateExisting();
+                return 0;
+            }
+
             context = new MessageLoopSynchronizationContext();
             System.Threading.SynchronizationContext.SetSynchronizationContext(context);
             using var shell = new BrowserShell();

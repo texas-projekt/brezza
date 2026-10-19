@@ -46,6 +46,9 @@ if (@(Get-Process -Name 'Brezza' -ErrorAction SilentlyContinue).Count -gt 0) {
     throw 'A Brezza process is already running. Close it first: the baseline capture needs the only one.'
 }
 
+# Every scenario actually captured, so a misspelled -Only value cannot finish with a PASS.
+$script:capturedScenarios = New-Object System.Collections.Generic.List[string]
+
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -64,23 +67,54 @@ public static class BaselineDrive
     private const uint TCM_GETCURSEL = 0x130B;
     private const int WHEEL_DELTA = 120;
 
-    private static IntPtr Strip(IntPtr window) => GetDlgItem(window, 1001);
+    // Filled from MainWindow's constants after Add-Type, so the driver and the shell share one
+    // definition of every control id.
+    public static int TabsControlId;
+    public static int NoticeControlId;
+
+    private static IntPtr Strip(IntPtr window) { return GetDlgItem(window, TabsControlId); }
+
+    public static IntPtr TabWindow(IntPtr window) { return Strip(window); }
 
     /// <summary>A browser command by id, exactly as a button or menu entry raises it.</summary>
-    public static void Command(IntPtr window, int controlId) => PostMessage(window, WM_COMMAND, new IntPtr(controlId), IntPtr.Zero);
+    public static void Command(IntPtr window, int controlId) { PostMessage(window, WM_COMMAND, new IntPtr(controlId), IntPtr.Zero); }
 
-    public static int TabCount(IntPtr window) => (int)SendMessage(Strip(window), TCM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero);
+    public static int TabCount(IntPtr window) { return (int)SendMessage(Strip(window), TCM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero); }
 
-    public static int SelectedTab(IntPtr window) => (int)SendMessage(Strip(window), TCM_GETCURSEL, IntPtr.Zero, IntPtr.Zero);
+    public static int SelectedTab(IntPtr window) { return (int)SendMessage(Strip(window), TCM_GETCURSEL, IntPtr.Zero, IntPtr.Zero); }
 
     /// <summary>True while the failure notice is showing (its static control is visible).</summary>
     public static bool NoticeVisible(IntPtr window)
     {
-        var notice = GetDlgItem(window, 1020);   // IdNotice
+        var notice = GetDlgItem(window, NoticeControlId);
         return notice != IntPtr.Zero && IsWindowVisible(notice);
     }
 
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    public static void CancelMenu(IntPtr window)
+    {
+        PostMessage(window, 0x0100, new IntPtr(0x1B), IntPtr.Zero);   // WM_KEYDOWN, VK_ESCAPE
+    }
+
+    [DllImport("user32.dll")] public static extern bool GetUpdateRect(IntPtr hWnd, out RECT rect, bool erase);
+
+    /// <summary>True while the window still has a region waiting to be painted.</summary>
+    public static bool IsPaintPending(IntPtr hWnd)
+    {
+        RECT ignored;
+        return GetUpdateRect(hWnd, out ignored, false);
+    }
+
+    /// <summary>The shell's custom toolbar pop-up while it is visible.</summary>
+    public static IntPtr MenuWindow()
+    {
+        var found = FindWindowEx(IntPtr.Zero, IntPtr.Zero, "BrezzaFlatPopup", null);
+        return found != IntPtr.Zero && IsWindowVisible(found) ? found : IntPtr.Zero;
+    }
 
     /// <summary>
     /// Wheel notches over the strip; a positive count moves the selection towards the first tab.
@@ -106,11 +140,37 @@ public static class BaselineDrive
 
     // The panel is a top-level owned window, not a child of the shell window, so it is found
     // among the top-level windows; the class is this application's own and only one shell runs.
-    public static IntPtr PanelWindow(IntPtr window) => FindWindowEx(IntPtr.Zero, IntPtr.Zero, "BrezzaInternalPanel", null);
+    public static IntPtr PanelWindow(IntPtr window) { return FindWindowEx(IntPtr.Zero, IntPtr.Zero, "BrezzaInternalPanel", null); }
 
-    public static void ClosePanelWindow(IntPtr panel) => PostMessage(panel, 0x0010, IntPtr.Zero, IntPtr.Zero);   // WM_CLOSE
+    public static void ClosePanelWindow(IntPtr panel) { PostMessage(panel, 0x0010, IntPtr.Zero, IntPtr.Zero); }   // WM_CLOSE
 }
 '@
+
+# Control ids are read from the shell's own constants instead of being repeated here. The Debug
+# assembly is already built (checked above), so this adds no build step and cannot drift.
+$appAssembly = [System.Reflection.Assembly]::LoadFrom($exe)
+$mainWindowType = $appAssembly.GetType('Brezza.App.MainWindow', $true)
+function Get-ControlId([string]$name)
+{
+    $field = $mainWindowType.GetField("Id$name", [System.Reflection.BindingFlags]'Public,Static')
+    if ($null -eq $field) { throw "MainWindow has no control id Id$name." }
+    return [int]$field.GetRawConstantValue()
+}
+$script:Ids = @{
+    Tabs = Get-ControlId 'Tabs'
+    NewTab = Get-ControlId 'NewTab'
+    NewPrivateTab = Get-ControlId 'NewPrivateTab'
+    Settings = Get-ControlId 'Settings'
+    History = Get-ControlId 'History'
+    Bookmarks = Get-ControlId 'Bookmarks'
+    Menu = Get-ControlId 'Menu'
+    BrowsingData = Get-ControlId 'BrowsingData'
+    Downloads = Get-ControlId 'Downloads'
+    Notice = Get-ControlId 'Notice'
+    NoticeDismiss = Get-ControlId 'NoticeDismiss'
+}
+[BaselineDrive]::TabsControlId = $script:Ids.Tabs
+[BaselineDrive]::NoticeControlId = $script:Ids.Notice
 
 $runRoot = Join-Path $projectRoot ('.test-data\baseline-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
@@ -190,7 +250,23 @@ function Get-SlowPageUrl { ([System.Uri]::new((Join-Path $runRoot 'slow.html')).
 $script:app = $null
 $script:main = [IntPtr]::Zero
 
-function Start-App([int]$startupSeconds = 3)
+function Wait-Paint([IntPtr]$window, [int]$seconds = 5)
+{
+    $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
+    $quietChecks = 0
+    while ([DateTime]::UtcNow -lt $deadline)
+    {
+        if (-not [BaselineDrive]::IsPaintPending($window))
+        {
+            $quietChecks++
+            if ($quietChecks -ge 2) { return }
+        }
+        else { $quietChecks = 0 }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
+function Start-App
 {
     $env:BREZZA_DATA_DIR = $runRoot
     $script:app = Start-Process -FilePath $exe -PassThru
@@ -202,7 +278,8 @@ function Start-App([int]$startupSeconds = 3)
         if ($script:app.MainWindowHandle -ne 0)
         {
             $script:main = $script:app.MainWindowHandle
-            Start-Sleep -Seconds $startupSeconds
+            Wait-Paint $script:main
+            Wait-Paint ([BaselineDrive]::TabWindow($script:main))
             return
         }
         Start-Sleep -Milliseconds 100
@@ -243,7 +320,9 @@ function Select-Tab([int]$index)
     {
         if ([BaselineDrive]::SelectedTab($script:main) -eq $index)
         {
-            Start-Sleep -Milliseconds 400   # the strip settles at the new offset before the shot
+            # The control repaints the new offset; waiting for its invalid region to clear is
+            # deterministic, unlike a fixed settle delay.
+            Wait-Paint ([BaselineDrive]::TabWindow($script:main))
             return
         }
         Start-Sleep -Milliseconds 100
@@ -267,7 +346,12 @@ function Open-Panel([int]$controlId)
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while ([DateTime]::UtcNow -lt $deadline)
     {
-        if ([BaselineDrive]::PanelWindow($script:main) -ne [IntPtr]::Zero) { Start-Sleep -Milliseconds 400; return }
+        $panel = [BaselineDrive]::PanelWindow($script:main)
+        if ($panel -ne [IntPtr]::Zero)
+        {
+            Wait-Paint $panel
+            return
+        }
         Start-Sleep -Milliseconds 100
     }
     throw "The panel for command $controlId never opened."
@@ -279,8 +363,43 @@ function Close-Panel
     if ($panel -ne [IntPtr]::Zero)
     {
         [BaselineDrive]::ClosePanelWindow($panel)
-        Start-Sleep -Milliseconds 400
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        while ([DateTime]::UtcNow -lt $deadline)
+        {
+            if ([BaselineDrive]::PanelWindow($script:main) -eq [IntPtr]::Zero) { return }
+            Start-Sleep -Milliseconds 50
+        }
+        throw 'The panel did not close.'
     }
+}
+
+function Open-Menu
+{
+    [BaselineDrive]::Command($script:main, $Ids.Menu)
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ([DateTime]::UtcNow -lt $deadline)
+    {
+        $menu = [BaselineDrive]::MenuWindow()
+        if ($menu -ne [IntPtr]::Zero)
+        {
+            Wait-Paint $menu
+            return
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    throw 'The toolbar menu did not open.'
+}
+
+function Close-Menu
+{
+    [BaselineDrive]::CancelMenu($script:main)
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ([DateTime]::UtcNow -lt $deadline)
+    {
+        if ([BaselineDrive]::MenuWindow() -eq [IntPtr]::Zero) { return }
+        Start-Sleep -Milliseconds 50
+    }
+    throw 'The toolbar menu did not close.'
 }
 
 function Capture([string]$scenario)
@@ -288,6 +407,7 @@ function Capture([string]$scenario)
     if ($Only.Count -gt 0 -and $Only -notcontains $scenario) { return }
     Write-Host "  -> $scenario"
     & (Join-Path $toolsRoot 'capture-window.ps1') -Scenario $scenario
+    $script:capturedScenarios.Add($scenario)
 }
 
 try
@@ -303,40 +423,40 @@ try
     Capture 'MinimumWindow'   # the preset pins 640x420; later captures pin 1120x760 again
 
     # Two plain tabs: the active one carries the close affordance and the built-in globe.
-    [BaselineDrive]::Command($script:main, 1002)   # IdNewTab
+    [BaselineDrive]::Command($script:main, $Ids.NewTab)   # IdNewTab
     Wait-TabCount 2
+    Wait-Paint ([BaselineDrive]::TabWindow($script:main))
     Capture 'CloseAffordance'
     Capture 'TabGlobe'
 
     # One wheel notch moves the active tab without disturbing the row.
     [BaselineDrive]::Wheel($script:main, 1)
-    Start-Sleep -Milliseconds 500
+    Wait-Paint ([BaselineDrive]::TabWindow($script:main))
     Capture 'TabsWheel'
 
     # The native panels, each through its own command.
-    Open-Panel 1017   # IdSettings
+    Open-Panel $Ids.Settings   # IdSettings
     Capture 'SettingsPanel'
     Capture 'SettingsDarkControls'
     Close-Panel
-    Open-Panel 1017
+    Open-Panel $Ids.Settings
     Capture 'SettingsFocus'
     Close-Panel
-    Open-Panel 1015   # IdHistory
+    Open-Panel $Ids.History   # IdHistory
     Capture 'HistoryPanel'
     Close-Panel
-    Open-Panel 1026   # IdDownloads
+    Open-Panel $Ids.Downloads   # IdDownloads
     Capture 'DownloadsPanel'
     Close-Panel
-    Open-Panel 1016   # IdBookmarks
+    Open-Panel $Ids.Bookmarks   # IdBookmarks
     Capture 'BookmarksEmpty'
     Close-Panel
-    Open-Panel 1025   # IdBrowsingData
+    Open-Panel $Ids.BrowsingData   # IdBrowsingData
     Capture 'DataPanel'
     Close-Panel
-    [BaselineDrive]::Command($script:main, 1018)   # IdMenu
-    Start-Sleep -Milliseconds 600
+    Open-Menu   # IdMenu
     Capture 'ToolbarMenu'
-    [BaselineDrive]::Command($script:main, 1018)   # dismiss the menu the same way
+    Close-Menu   # dismiss the menu the same way
 
     Stop-App
 
@@ -345,14 +465,16 @@ try
     Write-FaviconPage
     Write-SeededSettings 'Dark' '' $true
     Write-SeededSession (Get-FaviconPageUrl)
-    Start-App 4
+    Start-App
     Wait-Title 'Favicon Page'
-    Start-Sleep -Milliseconds 2000   # the runtime fetches the icon after the document loads
+    # The runtime fetches the favicon after the document loads and exposes no completion event to
+    # the window. This is the one state the external driver cannot observe; keep a bounded wait.
+    Start-Sleep -Milliseconds 2000
 
     # Nineteen tabs put the indicator between its ends, thirty crowd it fully.
-    1..18 | ForEach-Object { [BaselineDrive]::Command($script:main, 1002); Start-Sleep -Milliseconds 90 }
+    1..18 | ForEach-Object { [BaselineDrive]::Command($script:main, $Ids.NewTab) }
     Wait-TabCount 19
-    Start-Sleep -Milliseconds 600
+    Wait-Paint ([BaselineDrive]::TabWindow($script:main))
     Select-Tab 0
     Capture 'TabsIndicatorLeft'
     Select-Tab 9
@@ -360,9 +482,9 @@ try
     Select-Tab 18
     Capture 'TabsIndicatorRight'
 
-    1..11 | ForEach-Object { [BaselineDrive]::Command($script:main, 1002); Start-Sleep -Milliseconds 90 }
+    1..11 | ForEach-Object { [BaselineDrive]::Command($script:main, $Ids.NewTab) }
     Wait-TabCount 30
-    Start-Sleep -Milliseconds 600
+    Wait-Paint ([BaselineDrive]::TabWindow($script:main))
     Capture 'TabsCrowded'
     Select-Tab 0   # the tab whose page has the favicon
     Capture 'TabFavicon'
@@ -375,9 +497,9 @@ try
     Write-SlowPage
     Write-SeededSettings 'Dark' '' $true
     Write-SeededSession (Get-SlowPageUrl)
-    Start-App 4
+    Start-App
     Wait-Title 'Slow Page'   # the document painted and named itself, and its image still hangs
-    Start-Sleep -Milliseconds 800
+    Wait-Paint ([BaselineDrive]::TabWindow($script:main))
     Capture 'TabLoading'
     Stop-App
 
@@ -386,24 +508,31 @@ try
     Remove-Item (Join-Path $runRoot 'slow.html') -ErrorAction SilentlyContinue
     Write-SeededSettings 'Dark' '' $true
     Write-SeededSession (Get-MissingPageUrl)
-    Start-App 4
-    Start-Sleep -Milliseconds 1500
+    Start-App
+    $deadline = [DateTime]::UtcNow.AddSeconds(25)
+    while ([DateTime]::UtcNow -lt $deadline)
+    {
+        if ([BaselineDrive]::NoticeVisible($script:main)) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not [BaselineDrive]::NoticeVisible($script:main)) { throw 'The failure notice never appeared.' }
     Capture 'FailureNotice'
 
     # The failure notice belongs to the failed tab and outlives a tab switch, so it is dismissed
     # before the private tab is opened: the private-tab shot shows the private tab alone.
-    [BaselineDrive]::Command($script:main, 1022)   # IdNoticeDismiss
+    [BaselineDrive]::Command($script:main, $Ids.NoticeDismiss)   # IdNoticeDismiss
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
     while ([DateTime]::UtcNow -lt $deadline)
     {
         if (-not [BaselineDrive]::NoticeVisible($script:main)) { break }
         Start-Sleep -Milliseconds 100
     }
+    if ([BaselineDrive]::NoticeVisible($script:main)) { throw 'The failure notice did not dismiss.' }
 
     # A private tab leads with its private glyph alone and keeps the page's own title.
-    [BaselineDrive]::Command($script:main, 1003)   # IdNewPrivateTab
+    [BaselineDrive]::Command($script:main, $Ids.NewPrivateTab)   # IdNewPrivateTab
     Wait-TabCount 2
-    Start-Sleep -Milliseconds 700
+    Wait-Paint ([BaselineDrive]::TabWindow($script:main))
     Capture 'TabPrivate'
 
     Stop-App
@@ -421,6 +550,13 @@ try
     Start-App
     Capture 'ToolbarZh'
     Stop-App
+
+    # ---------- launch 7: dark shell, Traditional Chinese ----------
+    Write-Host '== dark shell, Traditional Chinese'
+    Write-SeededSettings 'Dark' 'zh-Hant' $false
+    Start-App
+    Capture 'ToolbarZhHant'
+    Stop-App
 }
 finally
 {
@@ -437,6 +573,11 @@ finally
 }
 
 Write-Host ''
+$missingScenarios = @($Only | Where-Object { $script:capturedScenarios -notcontains $_ })
+if ($missingScenarios.Count -gt 0) {
+    throw "Unknown or unavailable visual scenario(s): $($missingScenarios -join ', ')."
+}
+
 Write-Host 'PASS: baseline captured.'
 $manifest = Join-Path $projectRoot 'artifacts\capture-manifest.json'
 if (Test-Path $manifest)

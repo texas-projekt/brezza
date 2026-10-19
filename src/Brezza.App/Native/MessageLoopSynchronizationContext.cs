@@ -119,10 +119,17 @@ internal sealed class MessageLoopSynchronizationContext : SynchronizationContext
 
     private IntPtr OnWindowMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
-        if (msg == DrainQueueMessage)
+        try
         {
-            Drain();
-            return IntPtr.Zero;
+            if (msg == DrainQueueMessage)
+            {
+                Drain();
+                return IntPtr.Zero;
+            }
+        }
+        catch (Exception exception)
+        {
+            Trace.TraceError("A message-loop queue message failed: {0}", exception);
         }
 
         return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);

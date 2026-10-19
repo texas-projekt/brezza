@@ -25,6 +25,9 @@ public sealed class SettingsStoreTests
         store.Save(new BrowserSettings { Language = "zh-Hans" });
         Assert.Equal("zh-Hans", store.Load().Language);
 
+        store.Save(new BrowserSettings { Language = "zh-TW" });
+        Assert.Equal("zh-Hant", store.Load().Language);
+
         store.Save(new BrowserSettings { Language = "fr" });
         Assert.Equal(string.Empty, store.Load().Language);
     }
@@ -40,6 +43,40 @@ public sealed class SettingsStoreTests
 
         Assert.Equal(BrowserSettings.CurrentSchemaVersion, settings.SchemaVersion);
         Assert.Equal("https://www.bing.com/search?q={query}", settings.SearchTemplate);
+    }
+
+    [Fact]
+    public void Malformed_settings_are_moved_aside_before_defaults_are_used()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "settings.xml");
+        File.WriteAllText(path, "<settings");
+
+        var settings = new SettingsStore(path).Load();
+
+        Assert.Equal(BrowserSettings.CurrentSchemaVersion, settings.SchemaVersion);
+        Assert.False(File.Exists(path));
+        Assert.Single(Directory.GetFiles(directory.Path, "settings.xml.corrupt-*"));
+    }
+
+    [Fact]
+    public void One_invalid_field_does_not_discard_other_settings()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "settings.xml");
+        File.WriteAllText(path,
+            "<settings schemaVersion=\"4\">" +
+            "<searchTemplate>{query}{query}</searchTemplate>" +
+            "<language>en</language><theme>Dark</theme>" +
+            "<startupBehavior>RestoreSession</startupBehavior>" +
+            "</settings>");
+
+        var loaded = new SettingsStore(path).Load();
+
+        Assert.Equal(new BrowserSettings().SearchTemplate, loaded.SearchTemplate);
+        Assert.Equal("en", loaded.Language);
+        Assert.Equal(BrowserThemeMode.Dark, loaded.Theme);
+        Assert.Equal(BrowserStartupBehavior.RestoreSession, loaded.StartupBehavior);
     }
 
     [Fact]

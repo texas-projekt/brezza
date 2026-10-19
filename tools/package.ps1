@@ -1,13 +1,16 @@
 param([string]$Version = '0.1.8', [switch]$SkipLaunchVerification)
 
 $ErrorActionPreference = 'Stop'
+if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+    throw "Package version '$Version' is not semver (expected x.y.z or x.y.z-prerelease)."
+}
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $distRoot = Join-Path $projectRoot 'dist'
 $stageRoot = Join-Path $distRoot ('.stage-' + [guid]::NewGuid().ToString('N'))
 $archivePath = Join-Path $distRoot ("Brezza-$Version-win-x64-native.zip")
 $smokeRoot = Join-Path $projectRoot ('.test-data\package-' + [guid]::NewGuid().ToString('N'))
 
-if (Test-Path $archivePath) { throw "Package already exists: $archivePath" }
+if (Test-Path $archivePath) { Remove-Item -LiteralPath $archivePath -Force }
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
 
@@ -18,13 +21,15 @@ try {
 
     $required = @(
         'Brezza.exe',
+        'Brezza.exe.config',
         'Brezza.Core.dll',
         'Brezza.Persistence.dll',
         'Brezza.WebView2.dll',
         'Microsoft.Web.WebView2.Core.dll',
         'WebView2Loader.dll',
         'BrowserUi\locales\en.json',
-        'BrowserUi\locales\zh-Hans.json'
+        'BrowserUi\locales\zh-Hans.json',
+        'BrowserUi\locales\zh-Hant.json'
     )
     foreach ($relativePath in $required) {
         if (-not (Test-Path (Join-Path $stageRoot $relativePath))) { throw "Publish output is missing $relativePath." }
@@ -45,10 +50,16 @@ try {
     $merged = Join-Path $mergedDirectory 'Brezza.exe'
     $mergeInputs = 'Brezza.exe', 'Brezza.Core.dll', 'Brezza.Persistence.dll', 'Brezza.WebView2.dll', 'Microsoft.Web.WebView2.Core.dll' |
         ForEach-Object { Join-Path $stageRoot $_ }
-    dotnet tool restore
-    if ($LASTEXITCODE -ne 0) { throw 'dotnet tool restore failed.' }
-    dotnet ilrepack /out:$merged $mergeInputs
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $merged)) { throw 'The managed assemblies could not be merged.' }
+    Push-Location $projectRoot
+    try {
+        dotnet tool restore
+        if ($LASTEXITCODE -ne 0) { throw 'dotnet tool restore failed.' }
+        dotnet ilrepack /out:$merged $mergeInputs
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $merged)) { throw 'The managed assemblies could not be merged.' }
+    }
+    finally {
+        Pop-Location
+    }
     Move-Item -LiteralPath $merged -Destination (Join-Path $stageRoot 'Brezza.exe') -Force
     Remove-Item -LiteralPath $mergedDirectory -Recurse -Force
     foreach ($merged in @('Brezza.Core.dll', 'Brezza.Persistence.dll', 'Brezza.WebView2.dll', 'Microsoft.Web.WebView2.Core.dll')) {
@@ -72,8 +83,15 @@ try {
     }
 
     Compress-Archive -Path (Join-Path $stageRoot '*') -DestinationPath $archivePath -CompressionLevel Optimal
+    $checksum = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $checksumPath = $archivePath + '.sha256'
+    "$checksum  $([System.IO.Path]::GetFileName($archivePath))" |
+        Set-Content -LiteralPath $checksumPath -Encoding Ascii
     $verification = 'launch verification skipped'
     if (-not $SkipLaunchVerification) {
+    if (@(Get-Process -Name 'Brezza' -ErrorAction SilentlyContinue).Count -gt 0) {
+        throw 'Close the running Brezza window before package launch verification: the app is single-instance.'
+    }
     New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null
     Expand-Archive -LiteralPath $archivePath -DestinationPath (Join-Path $smokeRoot 'app') -Force
 
@@ -120,6 +138,7 @@ public static class PackageProbe {
 
     $previousDataRoot = $env:BREZZA_DATA_DIR
     $env:BREZZA_DATA_DIR = $dataRoot
+    $process = $null
     try {
         $process = Start-Process -FilePath (Join-Path $appDirectory 'Brezza.exe') -PassThru
         $mainWindow = [IntPtr]::Zero
@@ -156,6 +175,15 @@ public static class PackageProbe {
         if (-not $process.WaitForExit(15000)) { Stop-Process -Id $process.Id -Force; throw 'Packaged Brezza did not exit cleanly.' }
     }
     finally {
+        if ($null -ne $process) {
+            try {
+                $process.Refresh()
+                if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+            }
+            catch {
+                # The process may have exited between the refresh and the check.
+            }
+        }
         if ($null -eq $previousDataRoot) { Remove-Item Env:BREZZA_DATA_DIR -ErrorAction SilentlyContinue }
         else { $env:BREZZA_DATA_DIR = $previousDataRoot }
     }
@@ -163,7 +191,7 @@ public static class PackageProbe {
     }
 
     $archiveBytes = (Get-Item $archivePath).Length
-    "PASS: $archivePath ($([math]::Round($archiveBytes / 1MB, 2)) MiB compressed); managed assemblies merged into Brezza.exe; $verification."
+    "PASS: $archivePath ($([math]::Round($archiveBytes / 1MB, 2)) MiB compressed); managed assemblies merged into Brezza.exe; unsigned; SHA256 $checksum; $verification."
 }
 finally {
     if (Test-Path $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }

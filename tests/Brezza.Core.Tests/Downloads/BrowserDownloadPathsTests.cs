@@ -33,9 +33,39 @@ public sealed class BrowserDownloadPathsTests : IDisposable
     [InlineData("   ", "download")]
     [InlineData(null, "download")]
     [InlineData("bad|name?.txt", "badname.txt")]
+    [InlineData("CON", "_CON")]
+    [InlineData("nul.txt", "_nul.txt")]
+    [InlineData("COM1.log", "_COM1.log")]
     public void A_suggested_name_cannot_escape_the_downloads_folder(string? suggested, string expected)
     {
         Assert.Equal(expected, BrowserDownloadPaths.SanitizeFileName(suggested));
+    }
+
+    [Fact]
+    public void A_very_long_name_is_truncated_but_keeps_its_extension()
+    {
+        var sanitized = BrowserDownloadPaths.SanitizeFileName(new string('a', 400) + ".pdf");
+
+        Assert.True(sanitized.Length <= BrowserDownloadPaths.MaxFileNameLength);
+        Assert.EndsWith(".pdf", sanitized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_numbered_candidate_also_stays_within_the_limit()
+    {
+        var name = new string('b', BrowserDownloadPaths.MaxFileNameLength - 4) + ".txt";
+        File.WriteAllText(Path.Combine(_folder, name), "existing");
+
+        var target = BrowserDownloadPaths.ResolveTargetPath(_folder, name, File.Exists);
+
+        Assert.True(Path.GetFileName(target).Length <= BrowserDownloadPaths.MaxFileNameLength);
+        Assert.EndsWith(".txt", target, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_malformed_url_escape_is_kept_as_a_safe_file_name()
+    {
+        Assert.Equal("%zz", BrowserDownloadPaths.SuggestedFileNameFrom(null, "https://example.com/%zz"));
     }
 
     [Fact]

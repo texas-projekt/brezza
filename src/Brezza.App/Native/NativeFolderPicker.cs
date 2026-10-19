@@ -36,16 +36,14 @@ internal static class NativeFolderPicker
         [PreserveSig]
         int Show(IntPtr parent);
 
-        // Two members sit between Show and the ones below that this picker never calls. They are
-        // declared only to keep the vtable order correct: a member that is missing shifts every
-        // method after it onto another method's slot, which is how a picker ends up handing a
-        // value where a pointer belongs and faulting.
-        void UnusedAfterShow(IntPtr value);
-        void UnusedAfterShowTwo(IntPtr value);
-
+        // IFileDialog, in the exact vtable order. The Advise/Unadvise pair is declared even though
+        // this picker never subscribes to events: omitting them would shift SetOptions and every
+        // later method onto the wrong slot.
         void SetFileTypes(uint count, IntPtr types);
         void SetFileTypeIndex(uint index);
         void GetFileTypeIndex(out uint index);
+        void Advise(IntPtr events, out uint cookie);
+        void Unadvise(uint cookie);
         void SetOptions(uint options);
         void GetOptions(out uint options);
         void SetDefaultFolder(IShellItem item);
@@ -60,6 +58,7 @@ internal static class NativeFolderPicker
         void GetResult(out IShellItem item);
         void AddPlace(IShellItem item, int place);
         void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string extension);
+        void Close();
         void SetClientGuid(ref Guid guid);
         void ClearClientData();
         void SetFilter(IntPtr filter);
@@ -101,20 +100,30 @@ internal static class NativeFolderPicker
             // The picker is created through its coclass: the runtime builds the COM object behind
             // it, so the shell never calls CoCreateInstance itself.
             dialog = (IFileDialog)Activator.CreateInstance(typeof(FileOpenDialog))!;
+            System.Diagnostics.Trace.TraceInformation("Folder picker: dialog created.");
             dialog.SetOptions(PickFolders | ForceFileSystem | NoChangeDirectory | PathMustExist);
+            System.Diagnostics.Trace.TraceInformation("Folder picker: options set.");
             if (!string.IsNullOrWhiteSpace(initialPath) && TryCreateShellItem(initialPath!, out initial))
             {
                 dialog.SetFolder(initial);
+                System.Diagnostics.Trace.TraceInformation("Folder picker: initial folder set.");
             }
 
-            if (title.Length > 0) dialog.SetTitle(title);
+            if (title.Length > 0)
+            {
+                dialog.SetTitle(title);
+                System.Diagnostics.Trace.TraceInformation("Folder picker: title set.");
+            }
 
             var shown = dialog.Show(owner);
+            System.Diagnostics.Trace.TraceInformation("Folder picker: Show returned 0x{0:X8}.", shown);
             if (shown != 0 && shown != Cancelled) return null;
             dialog.GetResult(out result);
+            System.Diagnostics.Trace.TraceInformation("Folder picker: GetResult returned {0}.", result is null ? "null" : "an item");
             if (result is null) return null;
 
             result.GetDisplayName(DisplayNameFileSystemPath, out var folder);
+            System.Diagnostics.Trace.TraceInformation("Folder picker: display name read.");
             return string.IsNullOrWhiteSpace(folder) ? null : folder;
         }
         catch (Exception exception) when (
@@ -122,6 +131,7 @@ internal static class NativeFolderPicker
                 ArgumentException or AccessViolationException or SEHException)
         {
             // A picker the system refuses is a dismissal: the caller keeps its own error path.
+            System.Diagnostics.Trace.TraceWarning("Folder picker: {0}", exception);
             return null;
         }
         finally

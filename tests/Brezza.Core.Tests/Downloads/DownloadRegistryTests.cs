@@ -22,6 +22,31 @@ public sealed class DownloadRegistryTests
     }
 
     [Fact]
+    public void Starting_the_same_live_target_twice_keeps_one_entry()
+    {
+        var registry = new DownloadRegistry();
+
+        var first = registry.Start("https://example.com/file.bin", "file.bin", @"C:\Downloads\file.bin", BrowserSessionKind.Normal);
+        var second = registry.Start("https://example.com/file.bin", "file.bin", @"C:\Downloads\file.bin", BrowserSessionKind.Normal);
+
+        Assert.Equal(first.Id, second.Id);
+        Assert.Single(registry.Downloads);
+    }
+
+    [Fact]
+    public void Restoring_the_same_download_twice_keeps_one_entry()
+    {
+        var registry = new DownloadRegistry();
+        var download = new BrowserDownload("download-stored01", "https://example.com/report.pdf", "report.pdf",
+            @"C:\Downloads\report.pdf", BrowserDownloadState.Completed, Started, BrowserSessionKind.Normal);
+
+        registry.Restore(download);
+        registry.Restore(download);
+
+        Assert.Single(registry.Downloads);
+    }
+
+    [Fact]
     public void A_completed_download_records_its_total_size_and_completion_time()
     {
         var registry = new DownloadRegistry();

@@ -76,11 +76,14 @@ internal sealed partial class BrowserShell
             }
 
             await RunInitialSmokeAsync(pageUri);
+            System.Diagnostics.Trace.TraceInformation("Smoke: initial steps completed.");
             WriteSmokeResult(resultPath, "PASS: native controls, tabs, favicons, private cleanup, failure state, toolbar panels, cookie and browsing-data clearing, download management, and remote trust boundary.");
+            System.Diagnostics.Trace.TraceInformation("Smoke: result written.");
             await ShutdownAsync();
         }
         catch (Exception exception)
         {
+            System.Diagnostics.Trace.TraceError("Smoke: failed: {0}", exception);
             WriteSmokeResult(resultPath, "FAIL: " + exception + Environment.NewLine + DescribeNativeState());
             await ShutdownAsync();
         }
@@ -299,6 +302,18 @@ internal sealed partial class BrowserShell
             _runtime?.ActiveHost is { } host &&
             string.Equals(host.Source, pageUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(20));
 
+        // 6b. A script-initiated external scheme must be cancelled, reported, and must not mark the
+        // page failed. calculator:// is never launched by a page without a user gesture.
+        await ExecuteActivePageScriptAsync("location.href='calculator://open'");
+        await WaitForNoticeAsync("notice.externalSchemeBlocked");
+        if (_tabs?.ActiveTab?.State == TabRuntimeState.Failed)
+        {
+            throw new InvalidOperationException("A blocked external scheme marked the page as failed.");
+        }
+
+        _window.InvokeCommand(MainWindow.IdNoticeDismiss);
+        await WaitForAsync(() => !_window.IsNoticeVisible, TimeSpan.FromSeconds(5));
+
         // 7. Tabs: create through the native button, switch through the native tab strip.
         ClickButton(MainWindow.IdNewTab);
         await WaitForAsync(() => _tabs?.Tabs.Count == 2 && _tabs.ActiveTab?.Id == "tab-2", TimeSpan.FromSeconds(10));
@@ -388,6 +403,7 @@ internal sealed partial class BrowserShell
         MiddleClickTab(1);
         await WaitForAsync(() => _tabs?.Tabs.Count == 1 && !Directory.Exists(privateProfile), TimeSpan.FromSeconds(20));
 
+        System.Diagnostics.Trace.TraceInformation("Smoke phase: private cleanup done.");
         // 11. Leave the session on a normal page so restore can be verified.
         await NavigateThroughAddressBarAsync(pageUri.AbsoluteUri);
         await WaitForAsync(() =>
@@ -464,22 +480,28 @@ internal sealed partial class BrowserShell
             await WaitForAsync(() => _tabs?.Tabs.Count == expected, TimeSpan.FromSeconds(10));
         }
 
+        System.Diagnostics.Trace.TraceInformation("Smoke phase: crowded tabs done.");
         // 13. Cookies and browsing data are toolbar panels with their own tables. The local test
         // page plants two cookies on the test origin, so the cookies panel has rows to list, remove
         // one by one, and clear; the browsing-data panel lists the four data categories.
+        System.Diagnostics.Trace.TraceInformation("Smoke phase: cookies and data.");
         await AssertCookiesPanelAsync();
         await AssertBrowsingDataPanelAsync();
 
         // 14. A real download from the local origin is written to the downloads folder, recorded,
         // and managed through the downloads panel's own actions.
+        System.Diagnostics.Trace.TraceInformation("Smoke phase: downloads.");
         await AssertDownloadsPanelAsync();
 
         // 15. A running download is paused and resumed from its row, and cancelled behind its own
         // confirmation.
+        System.Diagnostics.Trace.TraceInformation("Smoke phase: download controls.");
         await AssertDownloadControlsAsync();
 
         // 16. The settings panel's downloads-folder picker opens, is accepted, and fills the field.
+        System.Diagnostics.Trace.TraceInformation("Smoke phase: download folder picker.");
         await AssertDownloadFolderPickerAsync();
+        System.Diagnostics.Trace.TraceInformation("Smoke phase: download folder picker returned.");
 
         // Leave the session on the ordinary smoke page again, so the saved session can be verified.
         await NavigateThroughAddressBarAsync(pageUri.AbsoluteUri);

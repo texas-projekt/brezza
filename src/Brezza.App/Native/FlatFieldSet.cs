@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace Brezza.App.Native;
@@ -175,6 +176,21 @@ internal sealed class FlatFieldSet : IDisposable
 
     private IntPtr OnFieldMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, IntPtr id, IntPtr data)
     {
+        try
+        {
+            return OnFieldMessageCore(hWnd, msg, wParam, lParam);
+        }
+        catch (Exception exception)
+        {
+            // The field is a real Win32 control; an exception must not escape its subclass.
+            Trace.TraceError("The field message {0} failed: {1}", msg, exception);
+        }
+
+        return NativeMethods.DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    private IntPtr OnFieldMessageCore(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
         if (!_fields.TryGetValue(hWnd, out var field)) return NativeMethods.DefSubclassProc(hWnd, msg, wParam, lParam);
         switch (msg)
         {
@@ -301,6 +317,20 @@ internal sealed class FlatFieldSet : IDisposable
     }
 
     private IntPtr OnInnerEditMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, IntPtr id, IntPtr data)
+    {
+        try
+        {
+            return OnInnerEditMessageCore(hWnd, msg, wParam, lParam);
+        }
+        catch (Exception exception)
+        {
+            Trace.TraceError("The inner edit message {0} failed: {1}", msg, exception);
+        }
+
+        return NativeMethods.DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    private IntPtr OnInnerEditMessageCore(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
         if (_innerEdits.TryGetValue(hWnd, out var combo))
         {

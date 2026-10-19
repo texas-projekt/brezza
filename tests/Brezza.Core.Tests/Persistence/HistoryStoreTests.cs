@@ -30,6 +30,8 @@ public sealed class HistoryStoreTests
         File.WriteAllText(path, "<history><broken>");
 
         Assert.Empty(new HistoryStore(path).GetAll());
+        Assert.False(File.Exists(path));
+        Assert.Single(Directory.GetFiles(directory.Path, "history.xml.corrupt-*"));
     }
 
     [Fact]

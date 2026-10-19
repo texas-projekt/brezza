@@ -255,9 +255,16 @@ internal sealed partial class BrowserShell
                 var ok = NativeMethods.GetDlgItem(dialog, NativeMethods.IDOK);
                 if (ok != IntPtr.Zero)
                 {
-                    NativeMethods.PostMessage(dialog, NativeMethods.WM_COMMAND, new IntPtr(NativeMethods.IDOK), ok);
-                    accepted.Set();
-                    return;
+                    // Let the modern dialog finish laying out its controls before driving the
+                    // button. Posting a command into a half-created dialog is what made this smoke
+                    // step flaky.
+                    System.Threading.Thread.Sleep(250);
+                    if (DialogStillOpen(dialog) && NativeMethods.IsWindow(ok))
+                    {
+                        NativeMethods.PostMessage(ok, NativeMethods.BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+                        accepted.Set();
+                        return;
+                    }
                 }
             }
 

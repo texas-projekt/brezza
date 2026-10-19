@@ -52,6 +52,12 @@ public sealed class DownloadRegistry
 
         lock (_downloads)
         {
+            // A repeated start for the same live file is the same operation, not a second row.
+            var existing = _downloads.FirstOrDefault(item =>
+                item.IsRunning &&
+                string.Equals(item.TargetFilePath, targetFilePath, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null) return existing;
+
             _downloads.Insert(0, download);
             if (_pendingStatuses.Count > 0 && _pendingStatuses.TryGetValue(targetFilePath, out var pending))
             {
@@ -110,6 +116,15 @@ public sealed class DownloadRegistry
         if (download is null) throw new ArgumentNullException(nameof(download));
         lock (_downloads)
         {
+            // A damaged or hand-edited store can repeat an entry; the list is keyed by both id and
+            // target path, matching how live statuses are applied.
+            if (_downloads.Any(item =>
+                string.Equals(item.Id, download.Id, StringComparison.Ordinal) ||
+                string.Equals(item.TargetFilePath, download.TargetFilePath, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
             _downloads.Add(download);
         }
 

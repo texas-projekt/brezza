@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using Brezza.Core.Navigation;
 
@@ -73,6 +74,44 @@ internal sealed class NativeThemePalette
     private NativeThemePalette() { }
 
     /// <summary>
+    /// The Windows high-contrast palette. It is built from the current system colors instead of the
+    /// fixed brand colors, so custom-drawn chrome follows the user's contrast scheme.
+    /// </summary>
+    public static NativeThemePalette HighContrast()
+    {
+        var surface = NativeMethods.GetSysColor(NativeMethods.COLOR_WINDOW);
+        return new NativeThemePalette
+        {
+            Scheme = IsDarkColor(surface) ? NativeColorScheme.Dark : NativeColorScheme.Light,
+            Frame = NativeMethods.GetSysColor(NativeMethods.COLOR_BTNFACE),
+            Surface = surface,
+            Field = surface,
+            Hover = NativeMethods.GetSysColor(NativeMethods.COLOR_BTNFACE),
+            Pressed = NativeMethods.GetSysColor(NativeMethods.COLOR_3DSHADOW),
+            Text = NativeMethods.GetSysColor(NativeMethods.COLOR_WINDOWTEXT),
+            SecondaryText = NativeMethods.GetSysColor(NativeMethods.COLOR_BTNTEXT),
+            DisabledText = NativeMethods.GetSysColor(NativeMethods.COLOR_GRAYTEXT),
+            Border = NativeMethods.GetSysColor(NativeMethods.COLOR_WINDOWFRAME),
+            BorderHover = NativeMethods.GetSysColor(NativeMethods.COLOR_HIGHLIGHT),
+            Accent = NativeMethods.GetSysColor(NativeMethods.COLOR_HIGHLIGHT),
+            AccentText = NativeMethods.GetSysColor(NativeMethods.COLOR_HIGHLIGHTTEXT),
+            Selection = NativeMethods.GetSysColor(NativeMethods.COLOR_HIGHLIGHT),
+            Notice = NativeMethods.GetSysColor(NativeMethods.COLOR_INFOBK),
+            NoticeText = NativeMethods.GetSysColor(NativeMethods.COLOR_INFOTEXT),
+            Danger = NativeMethods.GetSysColor(NativeMethods.COLOR_HOTLIGHT),
+            DangerText = NativeMethods.GetSysColor(NativeMethods.COLOR_HIGHLIGHTTEXT),
+        };
+    }
+
+    private static bool IsDarkColor(uint colorref)
+    {
+        var red = colorref & 0xFF;
+        var green = (colorref >> 8) & 0xFF;
+        var blue = (colorref >> 16) & 0xFF;
+        return red * 299 + green * 587 + blue * 114 < 128000;
+    }
+
+    /// <summary>
     /// Which system rendering standard controls, scroll bars, tooltips, and the window frame use.
     /// Windows offers only light and dark variants of those, so this is the one non-color property.
     /// </summary>
@@ -138,10 +177,10 @@ internal sealed class NativeThemeSource
     }
 
     /// <summary>
-    /// Re-resolves <see cref="BrowserThemeMode.System"/> after Windows reported a palette change;
-    /// returns whether the resolved palette changed.
+    /// Re-resolves the palette after Windows reported a system change; returns whether it changed.
+    /// High contrast applies to every mode, so this no longer stops at <see cref="BrowserThemeMode.System"/>.
     /// </summary>
-    public bool RefreshSystem() => Mode == BrowserThemeMode.System && Resolve();
+    public bool RefreshSystem() => Resolve();
 
     private bool Resolve()
     {
@@ -218,12 +257,23 @@ internal sealed class NativeThemeResources : IDisposable
 
 internal static class NativeTheme
 {
-    public static NativeThemePalette Resolve(BrowserThemeMode mode) => mode switch
+    public static NativeThemePalette Resolve(BrowserThemeMode mode)
     {
-        BrowserThemeMode.Dark => NativeThemePalette.Dark,
-        BrowserThemeMode.Light => NativeThemePalette.Light,
-        _ => IsSystemDark() ? NativeThemePalette.Dark : NativeThemePalette.Light,
-    };
+        if (IsHighContrast()) return NativeThemePalette.HighContrast();
+        return mode switch
+        {
+            BrowserThemeMode.Dark => NativeThemePalette.Dark,
+            BrowserThemeMode.Light => NativeThemePalette.Light,
+            _ => IsSystemDark() ? NativeThemePalette.Dark : NativeThemePalette.Light,
+        };
+    }
+
+    private static bool IsHighContrast()
+    {
+        var info = new NativeMethods.HIGHCONTRAST { cbSize = (uint)Marshal.SizeOf<NativeMethods.HIGHCONTRAST>() };
+        return NativeMethods.SystemParametersInfo(NativeMethods.SPI_GETHIGHCONTRAST, info.cbSize, ref info, 0) &&
+            (info.dwFlags & NativeMethods.HCF_HIGHCONTRASTON) != 0;
+    }
 
     private static bool IsSystemDark()
     {

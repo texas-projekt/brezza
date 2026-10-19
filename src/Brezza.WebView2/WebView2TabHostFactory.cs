@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Brezza.Core.Abstractions;
+using Brezza.Core.Downloads;
 using Brezza.Core.Privacy;
 using Brezza.Core.Tabs;
 using Microsoft.Web.WebView2.Core;
@@ -26,6 +28,8 @@ public sealed class WebView2TabHostFactory : ITabHostFactory, IBrowserDataManage
 {
     private static readonly TimeSpan CleanupBudget = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(250);
+    private const string OwnerFileName = "owner.txt";
+    private static readonly TimeSpan UnknownProfileGrace = TimeSpan.FromHours(24);
 
     // How long a single cookie deletion is given to show up in the store the runtime owns.
     private static readonly TimeSpan CookieDeleteSettleTimeout = TimeSpan.FromSeconds(2);
@@ -33,6 +37,7 @@ public sealed class WebView2TabHostFactory : ITabHostFactory, IBrowserDataManage
 
     private readonly string _userDataRoot;
     private readonly IntPtr _parentWindow;
+    private readonly DownloadRequestLimiter _downloadLimiter = new();
     private string? _downloadsFolder;
     private readonly Color _defaultBackgroundColor;
     private Task<CoreWebView2Environment>? _normalEnvironmentTask;
@@ -63,6 +68,7 @@ public sealed class WebView2TabHostFactory : ITabHostFactory, IBrowserDataManage
         _parentWindow = parentWindow;
         _downloadsFolder = downloadsFolder;
         _defaultBackgroundColor = defaultBackgroundColor ?? Color.White;
+        DiscoverOrphanedPrivateProfiles();
     }
 
     public string? PrivateUserDataFolder => _privateUserDataFolder;
@@ -74,9 +80,7 @@ public sealed class WebView2TabHostFactory : ITabHostFactory, IBrowserDataManage
     /// </summary>
     public string DownloadsFolder
     {
-        get => string.IsNullOrWhiteSpace(_downloadsFolder)
-            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
-            : _downloadsFolder!;
+        get => string.IsNullOrWhiteSpace(_downloadsFolder) ? KnownFolders.Downloads() : _downloadsFolder!;
         set => _downloadsFolder = string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
@@ -84,7 +88,7 @@ public sealed class WebView2TabHostFactory : ITabHostFactory, IBrowserDataManage
     {
         var environment = await GetEnvironmentAsync(sessionKind).ConfigureAwait(true);
         var options = CreateControllerOptions(environment, sessionKind);
-        return WebView2TabHost.Create(environment, _parentWindow, options, () => DownloadsFolder);
+        return WebView2TabHost.Create(environment, _parentWindow, options, () => DownloadsFolder, _downloadLimiter);
     }
 
     public async Task<SessionCleanupResult> CleanupSessionAsync(BrowserSessionKind sessionKind)
@@ -358,20 +362,113 @@ public sealed class WebView2TabHostFactory : ITabHostFactory, IBrowserDataManage
         }
     }
 
-    private Task<CoreWebView2Environment> GetEnvironmentAsync(BrowserSessionKind sessionKind)
+    /// <summary>
+    /// Finds private profiles a previous process left behind. A profile whose owner is still running
+    /// is skipped, so a second Brezza instance is never deleted; a profile without an owner marker
+    /// is only treated as orphaned after a day, because older builds did not write one.
+    /// </summary>
+    private void DiscoverOrphanedPrivateProfiles()
+    {
+        var container = Path.Combine(_userDataRoot, "PrivateSessions");
+        if (!Directory.Exists(container)) return;
+
+        try
+        {
+            foreach (var folder in Directory.EnumerateDirectories(container))
+            {
+                if (IsOwnedByLiveProcess(folder)) continue;
+
+                var marker = Path.Combine(folder, OwnerFileName);
+                if (!File.Exists(marker) &&
+                    Directory.GetCreationTimeUtc(folder) > DateTime.UtcNow - UnknownProfileGrace)
+                {
+                    continue;
+                }
+
+                _pendingPrivateFolders.Add(folder);
+            }
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            System.Diagnostics.Trace.TraceWarning(
+                "Orphaned private profiles could not be inspected: {0}", exception.Message);
+        }
+    }
+
+    private static bool IsOwnedByLiveProcess(string folder)
+    {
+        var marker = Path.Combine(folder, OwnerFileName);
+        if (!File.Exists(marker)) return false;
+
+        try
+        {
+            if (!int.TryParse(File.ReadAllText(marker).Trim(), out var processId) || processId <= 0) return false;
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (Exception exception) when (
+            exception is IOException || exception is UnauthorizedAccessException ||
+            exception is ArgumentException || exception is InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static void WriteOwnerMarker(string folder)
+    {
+        try
+        {
+            using var current = Process.GetCurrentProcess();
+            File.WriteAllText(Path.Combine(folder, OwnerFileName), current.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            // The marker is an optimization for startup cleanup, not a requirement for isolation.
+            System.Diagnostics.Trace.TraceWarning(
+                "A private profile owner marker could not be written: {0}", exception.Message);
+        }
+    }
+
+    private async Task<CoreWebView2Environment> GetEnvironmentAsync(BrowserSessionKind sessionKind)
     {
         if (sessionKind == BrowserSessionKind.Normal)
         {
-            if (_normalEnvironmentTask is not null) return _normalEnvironmentTask;
-            Directory.CreateDirectory(_userDataRoot);
-            _normalEnvironmentTask = CoreWebView2Environment.CreateAsync(null, _userDataRoot);
-            return _normalEnvironmentTask;
+            if (_normalEnvironmentTask is null)
+            {
+                Directory.CreateDirectory(_userDataRoot);
+                _normalEnvironmentTask = CoreWebView2Environment.CreateAsync(null, _userDataRoot);
+            }
+
+            try
+            {
+                return await _normalEnvironmentTask.ConfigureAwait(true);
+            }
+            catch
+            {
+                // A transient runtime failure must not poison every later tab in this process.
+                _normalEnvironmentTask = null;
+                throw;
+            }
         }
 
-        if (_privateEnvironmentTask is not null) return _privateEnvironmentTask;
-        _privateUserDataFolder = Path.Combine(_userDataRoot, "PrivateSessions", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_privateUserDataFolder);
-        _privateEnvironmentTask = CoreWebView2Environment.CreateAsync(null, _privateUserDataFolder);
-        return _privateEnvironmentTask;
+        if (_privateEnvironmentTask is null)
+        {
+            // Reuse the same profile folder across retries: creating another one here would leak
+            // the first folder, which no tab ever references.
+            _privateUserDataFolder ??= Path.Combine(_userDataRoot, "PrivateSessions", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(_privateUserDataFolder);
+            WriteOwnerMarker(_privateUserDataFolder);
+            _privateEnvironmentTask = CoreWebView2Environment.CreateAsync(null, _privateUserDataFolder);
+        }
+
+        try
+        {
+            return await _privateEnvironmentTask.ConfigureAwait(true);
+        }
+        catch
+        {
+            _privateEnvironmentTask = null;
+            throw;
+        }
     }
 }

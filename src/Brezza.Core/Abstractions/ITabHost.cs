@@ -29,6 +29,12 @@ public interface ITabHost : IDisposable
     /// <summary>True when the document shows a full-screen element.</summary>
     bool ContainsFullScreenElement { get; }
 
+    /// <summary>True while a download owned by this host is running or paused.</summary>
+    bool HasActiveDownload { get; }
+
+    /// <summary>True when the controller exists and can provide document state such as a favicon.</summary>
+    bool HasContent { get; }
+
     /// <summary>
     /// Shows or hides the host surface inside its parent window. Only the active tab's host is
     /// visible; the adapter decides how that is expressed.
@@ -79,15 +85,21 @@ public interface ITabHost : IDisposable
 
     event EventHandler? ProcessFailed;
 
-    event EventHandler? NavigationFailed;
+    event EventHandler<TabNavigationFailedEventArgs>? NavigationFailed;
 
     event EventHandler<TabNavigationResultEventArgs>? NavigationCompleted;
 
     /// <summary>A page asked the browser to open a new window.</summary>
     event EventHandler<PopupRequestedEventArgs>? PopupRequested;
 
+    /// <summary>A page requested an external URI scheme the browser refused to launch.</summary>
+    event EventHandler<ExternalSchemeBlockedEventArgs>? ExternalSchemeBlocked;
+
     /// <summary>A download started and was given a local target file.</summary>
     event EventHandler<DownloadStartedEventArgs>? DownloadStarted;
+
+    /// <summary>A download was refused by the browser-wide quota before it started.</summary>
+    event EventHandler<DownloadBlockedEventArgs>? DownloadBlocked;
 
     /// <summary>A download changed state.</summary>
     event EventHandler<DownloadStatusChangedEventArgs>? DownloadStatusChanged;

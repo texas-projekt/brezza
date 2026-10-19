@@ -26,9 +26,10 @@ confirmation that cleared all cookies, and a panel that measured the profile fol
 
 ## Decision
 
-All five panels are toolbar views with no browser URL of their own. They open from the toolbar menu
-— history (Ctrl+H), bookmarks, cookies, browsing data (Ctrl+Shift+Delete), and settings — and close
-when the user navigates, switches tabs, presses Escape, or uses the panel's own close action.
+All six panels are toolbar views with no browser URL of their own. They open from the toolbar menu
+— history (Ctrl+H), downloads (Ctrl+J), bookmarks, cookies, browsing data (Ctrl+Shift+Delete), and
+settings — and close when the user navigates, switches tabs, presses Escape, or uses the panel's own
+close action.
 
 The `brezza` scheme is no longer navigable. `NavigationInputParser` accepts HTTP, HTTPS, and file
 URLs only, so a `brezza://` address is searched like any other text that is not an address, and

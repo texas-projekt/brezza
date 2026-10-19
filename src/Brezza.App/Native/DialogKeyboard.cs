@@ -11,22 +11,32 @@ namespace Brezza.App.Native;
 /// </summary>
 internal static class DialogKeyboard
 {
-    private static readonly List<IntPtr> Dialogs = new();
+    private static readonly List<(IntPtr Handle, bool TabOnly)> Dialogs = new();
 
-    public static void Register(IntPtr dialog)
+    /// <param name="dialog">The window whose child controls take part in dialog navigation.</param>
+    /// <param name="tabOnly">
+    /// When true, only Tab and Shift+Tab are translated. The main browser window uses this so Enter
+    /// in the address field still reaches the address edit's own subclass instead of becoming IDOK.
+    /// </param>
+    public static void Register(IntPtr dialog, bool tabOnly = false)
     {
-        if (dialog != IntPtr.Zero && !Dialogs.Contains(dialog)) Dialogs.Add(dialog);
+        if (dialog == IntPtr.Zero || Dialogs.Exists(entry => entry.Handle == dialog)) return;
+        Dialogs.Add((dialog, tabOnly));
     }
 
-    public static void Unregister(IntPtr dialog) => Dialogs.Remove(dialog);
+    public static void Unregister(IntPtr dialog) => Dialogs.RemoveAll(entry => entry.Handle == dialog);
 
     /// <summary>Lets a registered window handle a keyboard message; returns true when it was consumed.</summary>
     public static bool TryTranslate(ref NativeMethods.MSG message)
     {
-        foreach (var dialog in Dialogs)
+        var tabOnlyKey = message.message == NativeMethods.WM_KEYDOWN &&
+            NativeMethods.GetLoWord(message.wParam) == NativeMethods.VK_TAB;
+
+        foreach (var entry in Dialogs)
         {
-            if (message.hwnd != dialog && !NativeMethods.IsChild(dialog, message.hwnd)) continue;
-            return NativeMethods.IsDialogMessage(dialog, ref message);
+            if (message.hwnd != entry.Handle && !NativeMethods.IsChild(entry.Handle, message.hwnd)) continue;
+            if (entry.TabOnly && !tabOnlyKey) continue;
+            return NativeMethods.IsDialogMessage(entry.Handle, ref message);
         }
 
         return false;

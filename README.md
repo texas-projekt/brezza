@@ -1,15 +1,18 @@
 # Brezza
 
-Brezza is a lightweight Windows browser built around a search-first workflow. Its shell is native Win32: the window, tab strip, address/search field, navigation buttons, notices, and settings/history/bookmark panels are real HWND controls, and WebView2 renders only website content in a separate surface. Search navigation, tabs, settings, local history, bookmarks, opt-in session restore, isolated private tabs, native System/Light/Dark themes, and the x64 framework-dependent package are implemented and smoke-tested. Downloads are written to the downloads folder and managed in a downloads panel (Ctrl+J): the list is kept across sessions, a completed file or its folder is opened from the panel, and a private download is listed only while its private session is open and never saved. Popup destinations open as tabs, and permission requests are denied with a notice until approval UI is added.
+Brezza is a lightweight Windows browser built around a search-first workflow. Its shell is native Win32: the window, tab strip, address/search field, navigation buttons, notices, and settings/history/bookmark panels are real HWND controls, and WebView2 renders only website content in a separate surface. Search navigation, tabs, settings, local history, bookmarks, opt-in session restore, isolated private tabs, native System/Light/Dark themes, English/Simplified/Traditional Chinese chrome, and the x64 framework-dependent package are implemented and smoke-tested. A second launch activates the one existing window instead of opening another profile tree. Downloads are written to the downloads folder and managed in a downloads panel (Ctrl+J): the list is kept across sessions, a completed file or its folder is opened from the panel, and a private download is listed only while its private session is open and never saved; a page may run three downloads at once and a known size over 8 GiB is refused. Popup destinations open as tabs, and permission requests are denied with a notice until approval UI is added.
 
 ## Build and test
 
 Building requires the .NET 10 SDK. The .NET Framework 4.8 reference assemblies are restored from NuGet. Running Brezza requires Windows with .NET Framework 4.8 and the Evergreen WebView2 Runtime. User data defaults to `%LOCALAPPDATA%\Brezza`; `BREZZA_DATA_DIR` can override it for isolated development runs.
 
 ```powershell
-dotnet restore Brezza.slnx
+dotnet restore Brezza.slnx --locked-mode
 dotnet build Brezza.slnx -c Release
 ```
+
+`global.json` pins the .NET 10 SDK feature band and `packages.lock.json` is committed. After changing a
+package reference, run `dotnet restore Brezza.slnx --force-evaluate` once to update the lock files.
 
 `tools/test.ps1` is the single entry point for the test suite. `-Stage` picks one layer — `Unit`, `Smoke`, `Package`, or `Visual` — and the default `All` runs them in order, stopping at the first failure:
 
@@ -19,14 +22,14 @@ powershell -ExecutionPolicy Bypass -File tools\test.ps1
 
 - `Unit` runs the Core and persistence tests (`dotnet test tests/Brezza.Core.Tests`) and writes TRX results to `artifacts/test-results/`.
 - `Smoke` builds Debug and runs the Windows integration smoke, which uses a Debug-only in-process driver that exercises the real native controls against an isolated local page. Its inspection switches are parameters (`-LongNotice`, `-PauseAfterFailureMs`, `-PauseAfterSettingsMs`, `-PauseAfterHistoryMs`, `-PauseAfterBookmarksMs`, `-Keep`).
-- `Package` runs the x64 framework-dependent packager, which verifies an extracted ZIP; `-PackageVersion` names the archive and `-SkipLaunchVerification` skips the launch check.
-- `Visual` builds Debug and captures the whole native UI baseline in one pass. It needs an interactive desktop, takes a few minutes, and produces screenshots for review rather than a pass or fail; `-VisualOnly <Scenario>` captures a single one (see [UI Visual Baseline](docs/UI_VISUAL_BASELINE.md)).
+- `Package` runs the x64 framework-dependent packager, which verifies an extracted ZIP; `-PackageVersion` names the archive and `-SkipLaunchVerification` skips the launch check. Releases are unsigned by decision; integrity comes from the SHA256 sidecar and GitHub build provenance.
+- `Visual` builds Debug and captures the automatable part of the native UI baseline in one pass. It needs an interactive desktop, takes a few minutes, and produces screenshots for review rather than a pass or fail; `-VisualOnly <Scenario>` captures a single one (see [UI Visual Baseline](docs/UI_VISUAL_BASELINE.md)).
 
 CI calls the same entry point (`tools/test.ps1 -Stage Unit`) for the stage its runners can run. The test layers, conventions, and when to run each are described in [Testing](docs/TESTING.md).
 
 `BREZZA_TRACE_LOG` optionally writes diagnostic trace output to a file, which is useful when investigating native lifetime problems.
 
-For a visual check of the native shell, start the Debug executable and capture its top-level window with `tools/capture-window.ps1`; the script writes a Windows BMP without requiring a UI framework or browser-page bridge. Use `-Width 640 -Height 420` for the minimum-window check, and repeat at the machine's 125%/150% display scale for DPI comparison.
+For a visual check of the native shell, run `tools/capture-window.ps1 -Scenario <Name>`; the preset owns the window class, canonical geometry, focus, and output file, and the script writes a PNG under `artifacts/` without requiring a UI framework or browser-page bridge. Use `-Scenario MinimumWindow` for the 640×420 minimum-window check, and repeat at the machine's 125%/150% display scale for DPI comparison. The available scenarios are listed in [UI Visual Baseline](docs/UI_VISUAL_BASELINE.md).
 
 ## Project Map
 
@@ -39,7 +42,7 @@ For a visual check of the native shell, start the Debug executable and capture i
 - `tools/smoke.ps1`: isolated Windows native-control integration smoke test.
 - `tools/capture-window.ps1`: scenario-driven window capture for the visual baseline (`-Scenario`).
 - `tools/package.ps1`: x64 framework-dependent packaging and extracted-package verification.
-- `docs/`: product definition, architecture, decisions, roadmap, changelog, and the testing guide.
+- `docs/`: product definition, architecture, decisions, roadmap, changelog, the testing guide, the [project assessment](docs/ASSESSMENT.md) with its repair progress, and the [unscheduled backlog](docs/BACKLOG.md).
 
 See [Product Definition](docs/PRODUCT.md), [Architecture](docs/ARCHITECTURE.md), and [Roadmap](docs/ROADMAP.md) before changing product or system boundaries.
 

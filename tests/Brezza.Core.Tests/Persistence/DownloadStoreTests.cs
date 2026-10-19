@@ -72,6 +72,21 @@ public sealed class DownloadStoreTests
     }
 
     [Fact]
+    public void A_record_with_an_invalid_timestamp_is_dropped()
+    {
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "downloads.xml");
+        File.WriteAllText(path,
+            "<downloads schemaVersion=\"1\"><entry>" +
+            "<id>download-bad</id><url>https://example.com/file.bin</url>" +
+            "<fileName>file.bin</fileName><targetPath>C:\\Downloads\\file.bin</targetPath>" +
+            "<state>1</state><startedUtcTicks>-1</startedUtcTicks>" +
+            "</entry></downloads>");
+
+        Assert.Empty(new DownloadStore(path).GetAll());
+    }
+
+    [Fact]
     public void Entries_without_a_target_path_are_dropped()
     {
         using var directory = new TestDirectory();

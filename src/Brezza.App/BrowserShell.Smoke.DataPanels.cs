@@ -39,6 +39,7 @@ internal sealed partial class BrowserShell
         await OpenPanelAndWaitAsync("cookies");
 
         // The panel lists exactly the two cookies the page planted.
+        await WaitForAsync(async () => await PanelListCountAsync() == 2, TimeSpan.FromSeconds(10));
         await AssertPanelListCountAsync(2);
         // Both rows show the origin that set them, in the second line the search field reads.
         await AssertPanelFilterLeavesAsync("127.0.0.1", 2);
@@ -59,6 +60,7 @@ internal sealed partial class BrowserShell
         // Clearing every cookie asks first and then reports what it did.
         await PlantSmokeCookiesAsync(cookieUri);
         await OpenPanelAndWaitAsync("cookies");
+        await WaitForAsync(async () => await PanelListCountAsync() == 2, TimeSpan.FromSeconds(10));
         await AssertPanelListCountAsync(2);
         var panel = await FindPanelWindowAsync();
         if (panel == IntPtr.Zero) throw new InvalidOperationException("The cookies panel window was not created.");

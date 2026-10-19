@@ -27,7 +27,7 @@ public sealed class SettingsStore
                 return new BrowserSettings();
             }
 
-            settings.SearchTemplate = NavigationInputParser.ValidateTemplate(settings.SearchTemplate);
+            settings.SearchTemplate = ValidateTemplateOrDefault(settings.SearchTemplate);
             settings.Language = BrowserSettings.NormalizeLanguage(settings.Language);
             settings.Theme = BrowserSettings.NormalizeTheme(settings.Theme);
             settings.StartupBehavior = BrowserSettings.NormalizeStartupBehavior(settings.StartupBehavior);
@@ -37,7 +37,21 @@ public sealed class SettingsStore
         }
         catch (Exception exception) when (exception is IOException || exception is InvalidOperationException || exception is ArgumentException)
         {
+            if (exception is not IOException) AtomicXmlFile.Quarantine(_path, exception);
             return new BrowserSettings();
+        }
+    }
+
+    private static string ValidateTemplateOrDefault(string? template)
+    {
+        try
+        {
+            return NavigationInputParser.ValidateTemplate(template);
+        }
+        catch (ArgumentException)
+        {
+            // One bad field must not discard the rest of the user's settings.
+            return new BrowserSettings().SearchTemplate;
         }
     }
 

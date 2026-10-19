@@ -73,7 +73,9 @@ public sealed class DownloadStore
     private static bool IsValid(DownloadRecord entry) =>
         !string.IsNullOrWhiteSpace(entry.Id) &&
         !string.IsNullOrWhiteSpace(entry.TargetPath) &&
-        entry.State is (int)BrowserDownloadState.Completed or (int)BrowserDownloadState.Interrupted;
+        entry.State is (int)BrowserDownloadState.Completed or (int)BrowserDownloadState.Interrupted &&
+        entry.StartedUtcTicks > 0 && entry.StartedUtcTicks <= DateTime.MaxValue.Ticks &&
+        (entry.CompletedUtcTicks is not { } completed || completed >= 0 && completed <= DateTime.MaxValue.Ticks);
 
     private static DownloadRecord ToRecord(BrowserDownload download) => new()
     {
@@ -100,7 +102,7 @@ public sealed class DownloadStore
         BrowserSessionKind.Normal,
         record.CompletedUtcTicks is { } completed ? new DateTime(completed, DateTimeKind.Utc) : (DateTime?)null,
         ulong.TryParse(record.TotalBytes, NumberStyles.None, CultureInfo.InvariantCulture, out var total) ? total : (ulong?)null,
-        record.InterruptReason.Length == 0 ? null : record.InterruptReason,
+        string.IsNullOrEmpty(record.InterruptReason) ? null : record.InterruptReason,
         ulong.TryParse(record.ReceivedBytes, NumberStyles.None, CultureInfo.InvariantCulture, out var received) ? received : (ulong?)null);
 
     [XmlRoot("downloads")]

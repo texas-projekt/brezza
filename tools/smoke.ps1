@@ -12,6 +12,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $exePath = Join-Path $projectRoot 'src\Brezza.App\bin\Debug\net48\Brezza.exe'
+if (@(Get-Process -Name 'Brezza' -ErrorAction SilentlyContinue).Count -gt 0) {
+    throw 'A Brezza window is already running. Close it before the smoke run: the app is single-instance.'
+}
 $runRoot = Join-Path $projectRoot ('.test-data\smoke-' + [guid]::NewGuid().ToString('N'))
 if (-not (Test-Path $exePath)) { throw 'Build Brezza.slnx in Debug before running the UI smoke test.' }
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
@@ -66,11 +69,11 @@ $faviconUri = 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 vi
 # of loading a real search engine that would leave its own cookies in the isolated profile. The
 # same origin plants the cookies the cookies panel is driven against: WebView2 keeps no cookies
 # for file:// pages, and the isolated profile has none of its own.
-$portFinder = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
-$portFinder.Start()
-$cookiePort = $portFinder.LocalEndpoint.Port
-$portFinder.Stop()
-$searchTemplate = "http://127.0.0.1:$cookiePort/search?q={query}"
+# The origin chooses its own port inside the job and reports it once the listener is running.
+# Allocating a port in this process and releasing it for the job would leave a race in which
+# another process could take the port before HttpListener binds it.
+$portFile = Join-Path $runRoot 'origin-port.txt'
+$portErrorFile = Join-Path $runRoot 'origin-port-error.txt'
 $cookieHtml = '<!doctype html><html><head><title>Brezza Cookie Page</title></head><body><h1>Cookie source</h1></body></html>'
 $searchHtml = '<!doctype html><html><head><title>Brezza Search Result</title></head><body><h1>Search result</h1></body></html>'
 # The same origin serves the attachments the downloads smoke drives: the browser writes them to the
@@ -78,12 +81,71 @@ $searchHtml = '<!doctype html><html><head><title>Brezza Search Result</title></h
 # streams in chunks, so a download stays running long enough to pause, resume, and cancel.
 $downloadBody = 'Brezza smoke download.'
 $slowDownloadBody = 'Brezza slow smoke download. ' + ('x' * 80)
+
+$previous = @{
+    DataRoot = $env:BREZZA_DATA_DIR
+    SmokeMode = $env:BREZZA_UI_SMOKE
+    SmokePage = $env:BREZZA_SMOKE_PAGE
+    SmokeResult = $env:BREZZA_SMOKE_RESULT
+    SmokeLanguage = $env:BREZZA_SMOKE_LANGUAGE
+    SmokeCookiePage = $env:BREZZA_SMOKE_COOKIE_PAGE
+    SmokeDownloadPage = $env:BREZZA_SMOKE_DOWNLOAD_PAGE
+    SmokeSlowDownloadPage = $env:BREZZA_SMOKE_SLOW_DOWNLOAD_PAGE
+    LongNotice = $env:BREZZA_SMOKE_LONG_NOTICE
+    PauseAfterFailure = $env:BREZZA_SMOKE_PAUSE_AFTER_FAILURE_MS
+    PauseAfterSettings = $env:BREZZA_SMOKE_PAUSE_AFTER_SETTINGS_MS
+    PauseAfterHistory = $env:BREZZA_SMOKE_PAUSE_AFTER_HISTORY_MS
+    PauseAfterBookmarks = $env:BREZZA_SMOKE_PAUSE_AFTER_BOOKMARKS_MS
+}
+function Invoke-SmokeProcess([string]$mode, [string]$resultPath) {
+    $env:BREZZA_UI_SMOKE = $mode
+    $env:BREZZA_SMOKE_RESULT = $resultPath
+    if (Test-Path $resultPath) { Remove-Item -LiteralPath $resultPath -Force }
+    $process = Start-Process -FilePath $exePath -PassThru
+    if (-not $process.WaitForExit(45000)) {
+        Stop-Process -Id $process.Id -Force
+        throw "Brezza smoke process timed out in mode '$mode'."
+    }
+
+    if (Test-Path $resultPath) {
+        $result = Get-Content -LiteralPath $resultPath -Raw
+        if (-not $result.StartsWith('PASS:', [StringComparison]::Ordinal)) {
+            # Keep the run root so the failure detail and isolated data can be inspected.
+            Write-Warning "Brezza smoke failed in mode '$mode'. Data root kept for inspection: $runRoot"
+            throw $result
+        }
+    }
+
+    return (Get-Content -LiteralPath $resultPath -Raw).Trim()
+}
+
 $cookieJob = Start-Job -ScriptBlock {
-    param($port, $smokeHtml, $cookiePageHtml, $searchPageHtml, $downloadBody, $slowDownloadBody)
+    param($portFile, $portErrorFile, $smokeHtml, $cookiePageHtml, $searchPageHtml, $downloadBody, $slowDownloadBody)
+    $listener = $null
     try {
-        $listener = New-Object System.Net.HttpListener
-        $listener.Prefixes.Add("http://127.0.0.1:$port/")
-        $listener.Start()
+        # Select and bind in this job. The parent never hands over an unbound port, so another
+        # process cannot take it between allocation and HttpListener.Start.
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $probe = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+            $probe.Start()
+            $candidatePort = [int]$probe.LocalEndpoint.Port
+            $probe.Stop()
+
+            $candidate = New-Object System.Net.HttpListener
+            $candidate.Prefixes.Add("http://127.0.0.1:$candidatePort/")
+            try {
+                $candidate.Start()
+                $listener = $candidate
+                [System.IO.File]::WriteAllText($portFile, [string]$candidatePort)
+                break
+            }
+            catch {
+                $candidate.Close()
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if ($null -eq $listener) { throw 'The smoke origin could not bind a local port.' }
+
         while ($true) {
             $context = $listener.GetContext()
             $path = $context.Request.Url.AbsolutePath
@@ -124,61 +186,57 @@ $cookieJob = Start-Job -ScriptBlock {
         }
     }
     catch {
-        # The harness stops this job when the smoke run is over.
+        # A normal stop at the end of the run also reaches this catch; the error file is only read
+        # when the port never became ready.
+        try { [System.IO.File]::WriteAllText($portErrorFile, $_.ToString()) } catch { }
     }
-} -ArgumentList $cookiePort, ([System.IO.File]::ReadAllText($pagePath)), $cookieHtml, $searchHtml, $downloadBody, $slowDownloadBody
-
-[System.IO.File]::WriteAllText(
-    (Join-Path $runRoot 'settings.xml'),
-    '<settings schemaVersion="1"><searchTemplate>' + $searchTemplate + '</searchTemplate><language>zh-Hans</language></settings>')
-
-$previous = @{
-    DataRoot = $env:BREZZA_DATA_DIR
-    SmokeMode = $env:BREZZA_UI_SMOKE
-    SmokePage = $env:BREZZA_SMOKE_PAGE
-    SmokeResult = $env:BREZZA_SMOKE_RESULT
-    SmokeLanguage = $env:BREZZA_SMOKE_LANGUAGE
-    SmokeCookiePage = $env:BREZZA_SMOKE_COOKIE_PAGE
-    SmokeDownloadPage = $env:BREZZA_SMOKE_DOWNLOAD_PAGE
-    SmokeSlowDownloadPage = $env:BREZZA_SMOKE_SLOW_DOWNLOAD_PAGE
-    LongNotice = $env:BREZZA_SMOKE_LONG_NOTICE
-    PauseAfterFailure = $env:BREZZA_SMOKE_PAUSE_AFTER_FAILURE_MS
-    PauseAfterSettings = $env:BREZZA_SMOKE_PAUSE_AFTER_SETTINGS_MS
-    PauseAfterHistory = $env:BREZZA_SMOKE_PAUSE_AFTER_HISTORY_MS
-    PauseAfterBookmarks = $env:BREZZA_SMOKE_PAUSE_AFTER_BOOKMARKS_MS
-}
-$env:BREZZA_DATA_DIR = $runRoot
-$env:BREZZA_SMOKE_PAGE = [System.Uri]::new($pagePath).AbsoluteUri
-$env:BREZZA_SMOKE_COOKIE_PAGE = "http://127.0.0.1:$cookiePort/cookie.html"
-$env:BREZZA_SMOKE_DOWNLOAD_PAGE = "http://127.0.0.1:$cookiePort/download"
-$env:BREZZA_SMOKE_SLOW_DOWNLOAD_PAGE = "http://127.0.0.1:$cookiePort/slow-download"
-$env:BREZZA_SMOKE_LANGUAGE = 'zh-Hans'
-if ($LongNotice) { $env:BREZZA_SMOKE_LONG_NOTICE = '1' }
-if ($PauseAfterFailureMs -gt 0) { $env:BREZZA_SMOKE_PAUSE_AFTER_FAILURE_MS = "$PauseAfterFailureMs" }
-if ($PauseAfterSettingsMs -gt 0) { $env:BREZZA_SMOKE_PAUSE_AFTER_SETTINGS_MS = "$PauseAfterSettingsMs" }
-if ($PauseAfterHistoryMs -gt 0) { $env:BREZZA_SMOKE_PAUSE_AFTER_HISTORY_MS = "$PauseAfterHistoryMs" }
-if ($PauseAfterBookmarksMs -gt 0) { $env:BREZZA_SMOKE_PAUSE_AFTER_BOOKMARKS_MS = "$PauseAfterBookmarksMs" }
-
-function Invoke-SmokeProcess([string]$mode, [string]$resultPath) {
-    $env:BREZZA_UI_SMOKE = $mode
-    $env:BREZZA_SMOKE_RESULT = $resultPath
-    if (Test-Path $resultPath) { Remove-Item -LiteralPath $resultPath -Force }
-    $process = Start-Process -FilePath $exePath -PassThru
-    if (-not $process.WaitForExit(45000)) {
-        Stop-Process -Id $process.Id -Force
-        throw "Brezza smoke process timed out in mode '$mode'."
-    }
-
-    if (Test-Path $resultPath) {
-        $result = Get-Content -LiteralPath $resultPath -Raw
-        if (-not $result.StartsWith('PASS:', [StringComparison]::Ordinal)) {
-            # Keep the run root so the failure detail and isolated data can be inspected.
-            Write-Warning "Brezza smoke failed in mode '$mode'. Data root kept for inspection: $runRoot"
-            throw $result
+    finally {
+        if ($null -ne $listener) {
+            try { $listener.Stop(); $listener.Close() } catch { }
         }
     }
+} -ArgumentList $portFile, $portErrorFile, ([System.IO.File]::ReadAllText($pagePath)), $cookieHtml, $searchHtml, $downloadBody, $slowDownloadBody
 
-    return (Get-Content -LiteralPath $resultPath -Raw).Trim()
+try {
+    $portDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (-not (Test-Path -LiteralPath $portFile)) {
+        if ($cookieJob.State -in @('Failed', 'Completed')) {
+            $detail = if (Test-Path -LiteralPath $portErrorFile) { Get-Content -LiteralPath $portErrorFile -Raw } else { 'the origin job stopped without a port' }
+            throw "The smoke origin did not start: $detail"
+        }
+        if ([DateTime]::UtcNow -ge $portDeadline) { throw 'The smoke origin did not report a port within 30 seconds.' }
+        Start-Sleep -Milliseconds 100
+    }
+    $cookiePort = [int](Get-Content -LiteralPath $portFile -Raw).Trim()
+}
+catch {
+    Stop-Job -Job $cookieJob -ErrorAction SilentlyContinue
+    Remove-Job -Job $cookieJob -Force -ErrorAction SilentlyContinue
+    throw
+}
+$searchTemplate = "http://127.0.0.1:$cookiePort/search?q={query}"
+
+try {
+    [System.IO.File]::WriteAllText(
+        (Join-Path $runRoot 'settings.xml'),
+        '<settings schemaVersion="1"><searchTemplate>' + $searchTemplate + '</searchTemplate><language>zh-Hans</language></settings>')
+
+    $env:BREZZA_DATA_DIR = $runRoot
+    $env:BREZZA_SMOKE_PAGE = [System.Uri]::new($pagePath).AbsoluteUri
+    $env:BREZZA_SMOKE_COOKIE_PAGE = "http://127.0.0.1:$cookiePort/cookie.html"
+    $env:BREZZA_SMOKE_DOWNLOAD_PAGE = "http://127.0.0.1:$cookiePort/download"
+    $env:BREZZA_SMOKE_SLOW_DOWNLOAD_PAGE = "http://127.0.0.1:$cookiePort/slow-download"
+    $env:BREZZA_SMOKE_LANGUAGE = 'zh-Hans'
+    if ($LongNotice) { $env:BREZZA_SMOKE_LONG_NOTICE = '1' }
+    if ($PauseAfterFailureMs -gt 0) { $env:BREZZA_SMOKE_PAUSE_AFTER_FAILURE_MS = "$PauseAfterFailureMs" }
+    if ($PauseAfterSettingsMs -gt 0) { $env:BREZZA_SMOKE_PAUSE_AFTER_SETTINGS_MS = "$PauseAfterSettingsMs" }
+    if ($PauseAfterHistoryMs -gt 0) { $env:BREZZA_SMOKE_PAUSE_AFTER_HISTORY_MS = "$PauseAfterHistoryMs" }
+    if ($PauseAfterBookmarksMs -gt 0) { $env:BREZZA_SMOKE_PAUSE_AFTER_BOOKMARKS_MS = "$PauseAfterBookmarksMs" }
+}
+catch {
+    Stop-Job -Job $cookieJob -ErrorAction SilentlyContinue
+    Remove-Job -Job $cookieJob -Force -ErrorAction SilentlyContinue
+    throw
 }
 
 try {

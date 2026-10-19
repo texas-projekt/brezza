@@ -39,6 +39,16 @@ public sealed class TabSleepPolicyTests
     }
 
     [Fact]
+    public void A_tab_with_an_active_download_is_kept_alive()
+    {
+        var outcome = TabSleepPolicy.Evaluate(
+            new TabHostSignals(isLoading: false, isDocumentPlayingAudio: false, containsFullScreenElement: false, hasActiveDownload: true),
+            isActiveTab: false);
+
+        Assert.Equal(TabSleepOutcome.Downloading, outcome);
+    }
+
+    [Fact]
     public void A_host_that_cannot_be_evaluated_is_treated_as_busy()
     {
         var signals = TabHostSignals.FromHost(null!);
@@ -85,6 +95,10 @@ public sealed class TabSleepPolicyTests
 
         public bool ContainsFullScreenElement { get; set; }
 
+        public bool HasActiveDownload { get; set; }
+
+        public bool HasContent { get; set; } = true;
+
         public Task NavigateAsync(Uri uri) => Task.CompletedTask;
 
         public void GoBack() { }
@@ -103,13 +117,17 @@ public sealed class TabSleepPolicyTests
 
         public event EventHandler? ProcessFailed;
 
-        public event EventHandler? NavigationFailed;
+        public event EventHandler<TabNavigationFailedEventArgs>? NavigationFailed;
 
         public event EventHandler<TabNavigationResultEventArgs>? NavigationCompleted;
 
         public event EventHandler<PopupRequestedEventArgs>? PopupRequested;
 
+        public event EventHandler<ExternalSchemeBlockedEventArgs>? ExternalSchemeBlocked;
+
         public event EventHandler<DownloadStartedEventArgs>? DownloadStarted;
+
+        public event EventHandler<DownloadBlockedEventArgs>? DownloadBlocked;
 
         public event EventHandler<DownloadStatusChangedEventArgs>? DownloadStatusChanged;
 

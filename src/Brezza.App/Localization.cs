@@ -3,22 +3,24 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Web.Script.Serialization;
+using Brezza.Core.Localization;
 
 namespace Brezza.App;
 
 /// <summary>
-/// Reads the browser's localized strings from <c>BrowserUi/locales</c>. The native shell keeps the
-/// same language packs and language rules the previous chrome used: English and Simplified Chinese,
-/// with a system-language default.
+/// Reads the browser's localized strings from <c>BrowserUi/locales</c>. The shell ships English,
+/// Simplified Chinese, and Traditional Chinese packs, with a system-language default.
 /// </summary>
 internal sealed class Localization
 {
-    public const string English = "en";
-    public const string Chinese = "zh-Hans";
+    public const string English = BrowserLanguagePolicy.English;
+    public const string Chinese = BrowserLanguagePolicy.SimplifiedChinese;
+    public const string TraditionalChinese = BrowserLanguagePolicy.TraditionalChinese;
 
     private readonly string _localesDirectory;
     private readonly JavaScriptSerializer _serializer = new();
     private Dictionary<string, string> _strings = new(StringComparer.Ordinal);
+    private Dictionary<string, string> _fallback = new(StringComparer.Ordinal);
 
     public Localization(string assetsDirectory)
     {
@@ -26,49 +28,40 @@ internal sealed class Localization
         LoadLanguage(English);
     }
 
-    /// <summary>The active language key, either <see cref="English"/> or <see cref="Chinese"/>.</summary>
+    /// <summary>The active language key: English, Simplified Chinese, or Traditional Chinese.</summary>
     public string Language { get; private set; } = English;
 
     /// <summary>Loads a language pack, falling back to English when it cannot be read.</summary>
     public void LoadLanguage(string? language)
     {
         var normalized = Normalize(language);
-        var loaded = Load(normalized);
-        if (loaded is null && !string.Equals(normalized, English, StringComparison.Ordinal))
+        var fallback = Load(English);
+        var loaded = string.Equals(normalized, English, StringComparison.Ordinal)
+            ? fallback
+            : Load(normalized);
+        if (loaded is null)
         {
-            loaded = Load(English);
+            loaded = fallback;
             normalized = English;
         }
 
-        if (loaded is not null)
-        {
-            _strings = loaded;
-            Language = normalized;
-            return;
-        }
-
-        _strings = new Dictionary<string, string>(StringComparer.Ordinal);
-        Language = English;
+        _strings = loaded ?? new Dictionary<string, string>(StringComparer.Ordinal);
+        _fallback = fallback ?? new Dictionary<string, string>(StringComparer.Ordinal);
+        Language = normalized;
     }
 
     /// <summary>Maps any language value to a supported language key.</summary>
-    public static string Normalize(string? language)
-    {
-        if (string.IsNullOrWhiteSpace(language)) return English;
-        return string.Equals(language!.Trim(), Chinese, StringComparison.OrdinalIgnoreCase)
-            ? Chinese
-            : English;
-    }
+    public static string Normalize(string? language) => BrowserLanguagePolicy.Normalize(language);
 
     /// <summary>The language the Windows UI culture selects when nothing is configured.</summary>
     public static string SystemLanguage() =>
-        CultureInfo.InstalledUICulture.Name.StartsWith("zh", StringComparison.OrdinalIgnoreCase)
-            ? Chinese
-            : English;
+        BrowserLanguagePolicy.FromCulture(CultureInfo.InstalledUICulture.Name);
 
     public string Get(string key)
     {
-        return _strings.TryGetValue(key, out var value) ? value : key;
+        if (_strings.TryGetValue(key, out var value)) return value;
+        // A key missing from a translated pack falls back to English instead of showing the key.
+        return _fallback.TryGetValue(key, out var fallback) ? fallback : key;
     }
 
     /// <summary>Gets a string and replaces its <c>{name}</c> placeholder.</summary>

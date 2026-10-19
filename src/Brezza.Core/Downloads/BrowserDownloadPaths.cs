@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -6,12 +7,25 @@ using System.Text;
 namespace Brezza.Core.Downloads;
 
 /// <summary>
-/// Resolves where a download is written. The file name comes from the page, so it is sanitized and
-/// de-duplicated instead of being trusted.
+/// Resolves where a download is written. The file name comes from the page, so it is sanitized,
+/// length-limited, and de-duplicated instead of being trusted.
 /// </summary>
 public static class BrowserDownloadPaths
 {
     public const string FallbackFileName = "download";
+
+    /// <summary>
+    /// Keeps the complete path comfortably below the legacy 260-character limit even when the
+    /// downloads folder is long. The extension is preserved.
+    /// </summary>
+    public const int MaxFileNameLength = 120;
+
+    private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
 
     public static string SanitizeFileName(string? suggestedFileName)
     {
@@ -27,8 +41,31 @@ public static class BrowserDownloadPaths
         }
 
         // A leading dot would create a hidden or relative file name.
-        var cleaned = builder.ToString().Trim().TrimStart('.').TrimEnd('.');
-        return cleaned.Length == 0 ? FallbackFileName : cleaned;
+        var cleaned = builder.ToString().Trim().TrimStart('.').TrimEnd('.', ' ');
+        if (cleaned.Length == 0) return FallbackFileName;
+
+        var extension = Path.GetExtension(cleaned);
+        var stem = Path.GetFileNameWithoutExtension(cleaned).TrimEnd(' ', '.');
+        if (stem.Length == 0) return FallbackFileName;
+
+        // CON, NUL, COM1, and friends name devices even when an extension follows them.
+        if (ReservedNames.Contains(stem)) stem = "_" + stem;
+        return Fit(stem, extension);
+    }
+
+    /// <summary>Truncates the stem so the name stays under the limit while keeping the extension.</summary>
+    private static string Fit(string stem, string extension)
+    {
+        if (extension.Length > 16) extension = extension.Substring(0, 16);
+        var maximumStem = MaxFileNameLength - extension.Length;
+        if (maximumStem < 1)
+        {
+            extension = string.Empty;
+            maximumStem = MaxFileNameLength;
+        }
+
+        if (stem.Length > maximumStem) stem = stem.Substring(0, maximumStem).TrimEnd(' ', '.');
+        return stem.Length == 0 ? FallbackFileName : stem + extension;
     }
 
     /// <summary>Returns a free file path in <paramref name="downloadsFolder"/> for a suggested name.</summary>
@@ -45,7 +82,10 @@ public static class BrowserDownloadPaths
         var extension = Path.GetExtension(name);
         for (var index = 1; index < 1000; index++)
         {
-            candidate = Path.Combine(folder, stem + " (" + index.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")" + extension);
+            var suffix = " (" + index.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")";
+            var maximumStem = Math.Max(1, MaxFileNameLength - extension.Length - suffix.Length);
+            var trimmedStem = stem.Length > maximumStem ? stem.Substring(0, maximumStem).TrimEnd(' ', '.') : stem;
+            candidate = Path.Combine(folder, trimmedStem + suffix + extension);
             if (!fileExists(candidate)) return candidate;
         }
 
@@ -74,7 +114,18 @@ public static class BrowserDownloadPaths
             var segment = uri.Segments.LastOrDefault()?.Trim('/');
             if (segment is not null && segment.Length > 0)
             {
-                var sanitized = SanitizeFileName(Uri.UnescapeDataString(segment));
+                string decoded;
+                try
+                {
+                    decoded = Uri.UnescapeDataString(segment);
+                }
+                catch (UriFormatException)
+                {
+                    // A malformed escape sequence is a bad page-provided name, not a crash.
+                    return FallbackFileName;
+                }
+
+                var sanitized = SanitizeFileName(decoded);
                 if (!string.Equals(sanitized, FallbackFileName, StringComparison.OrdinalIgnoreCase)) return sanitized;
             }
         }

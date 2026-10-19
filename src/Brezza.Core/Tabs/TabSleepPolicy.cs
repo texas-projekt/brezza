@@ -8,17 +8,18 @@ namespace Brezza.Core.Tabs;
 /// </summary>
 public sealed class TabHostSignals
 {
-    public TabHostSignals(bool isLoading, bool isDocumentPlayingAudio, bool containsFullScreenElement)
+    public TabHostSignals(bool isLoading, bool isDocumentPlayingAudio, bool containsFullScreenElement, bool hasActiveDownload = false)
     {
         IsLoading = isLoading;
         IsDocumentPlayingAudio = isDocumentPlayingAudio;
         ContainsFullScreenElement = containsFullScreenElement;
+        HasActiveDownload = hasActiveDownload;
     }
 
     public static TabHostSignals FromHost(ITabHost host) =>
         host is null
-            ? new TabHostSignals(isLoading: true, isDocumentPlayingAudio: false, containsFullScreenElement: false)
-            : new TabHostSignals(host.IsLoading, host.IsDocumentPlayingAudio, host.ContainsFullScreenElement);
+            ? new TabHostSignals(isLoading: true, isDocumentPlayingAudio: false, containsFullScreenElement: false, hasActiveDownload: false)
+            : new TabHostSignals(host.IsLoading, host.IsDocumentPlayingAudio, host.ContainsFullScreenElement, host.HasActiveDownload);
 
     /// <summary>True when a navigation is still in flight for the host.</summary>
     public bool IsLoading { get; }
@@ -28,6 +29,9 @@ public sealed class TabHostSignals
 
     /// <summary>True when the document shows a full-screen element.</summary>
     public bool ContainsFullScreenElement { get; }
+
+    /// <summary>True while a download owned by the host is running or paused.</summary>
+    public bool HasActiveDownload { get; }
 }
 
 /// <summary>Why a tab host was or was not released. <see cref="Released"/> means the host is gone.</summary>
@@ -37,6 +41,7 @@ public enum TabSleepOutcome
     UnknownTab,
     NoHost,
     ActiveTab,
+    Downloading,
     Loading,
     PlayingAudio,
     FullScreen,
@@ -51,6 +56,7 @@ public static class TabSleepPolicy
     public static TabSleepOutcome Evaluate(TabHostSignals signals, bool isActiveTab)
     {
         if (isActiveTab) return TabSleepOutcome.ActiveTab;
+        if (signals.HasActiveDownload) return TabSleepOutcome.Downloading;
         if (signals.IsLoading) return TabSleepOutcome.Loading;
         if (signals.IsDocumentPlayingAudio) return TabSleepOutcome.PlayingAudio;
         if (signals.ContainsFullScreenElement) return TabSleepOutcome.FullScreen;
