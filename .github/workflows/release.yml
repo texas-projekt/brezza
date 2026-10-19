@@ -70,7 +70,10 @@ jobs:
             dist/*.zip.sha256
           retention-days: 30
 
-      - uses: actions/attest-build-provenance@v2
+      # GitHub does not offer attestations for user-owned private repositories.
+      # Keep the release path working there; public repositories still get provenance.
+      - if: ${{ github.event.repository.visibility == 'public' }}
+        uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/*.zip
 
