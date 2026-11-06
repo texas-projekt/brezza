@@ -354,20 +354,6 @@ public sealed class WebView2TabHost : ITabHost
         }
     }
 
-    /// <summary>
-    /// Runs a script in the rendered document on behalf of the shell. This is a host-side
-    /// verification tool; remote pages receive no equivalent capability. It is compiled only in
-    /// Debug builds, so the shipped application exposes no general-purpose script entry point.
-    /// </summary>
-#if DEBUG
-    public Task<string> ExecuteScriptAsync(string script)
-    {
-        ThrowIfDisposed();
-        if (_controller is null) throw new InvalidOperationException("WebView2 is not initialized.");
-        return _controller.CoreWebView2.ExecuteScriptAsync(script);
-    }
-#endif
-
     public void Dispose()
     {
         if (_disposed) return;

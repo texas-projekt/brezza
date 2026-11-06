@@ -402,7 +402,6 @@ internal sealed partial class BrowserShell : IDisposable
         _window.SetNewTabPage(host is null && string.IsNullOrWhiteSpace(active?.Url),
             active?.SessionKind == BrowserSessionKind.Private);
 
-        WriteSmokeState();
     }
 
     /// <summary>
@@ -783,10 +782,4 @@ internal sealed partial class BrowserShell : IDisposable
     private static void TraceWarning(string message, Exception exception) =>
         System.Diagnostics.Trace.TraceWarning(message + ": {0}", exception.Message);
 
-    private void WriteSmokeState()
-    {
-#if DEBUG
-        NativeSmokeState.Write(_window, _tabs, _runtime, _panelMode);
-#endif
-    }
 }

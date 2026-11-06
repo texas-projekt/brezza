@@ -612,8 +612,6 @@ internal sealed partial class MainWindow : IDisposable
 
     public bool IsNoticeVisible => _noticeVisible;
 
-    public string WindowTitle => _hwnd == IntPtr.Zero ? string.Empty : NativeMethods.GetWindowText(_hwnd);
-
     public string NoticeText => _noticeText == IntPtr.Zero ? string.Empty : NativeMethods.GetWindowText(_noticeText);
 
     public string AddressText => _addressCombo == IntPtr.Zero ? string.Empty : NativeMethods.GetWindowText(_addressCombo);
@@ -626,18 +624,6 @@ internal sealed partial class MainWindow : IDisposable
     {
         var control = GetControl(controlId);
         return control != IntPtr.Zero && NativeMethods.IsWindowVisible(control);
-    }
-
-    public bool IsControlEnabled(int controlId)
-    {
-        var control = GetControl(controlId);
-        return control != IntPtr.Zero && NativeMethods.IsWindowEnabled(control);
-    }
-
-    public string GetControlText(int controlId)
-    {
-        var control = GetControl(controlId);
-        return control == IntPtr.Zero ? string.Empty : NativeMethods.GetWindowText(control);
     }
 
     public int TabCount => _tabStrip == IntPtr.Zero
@@ -1062,11 +1048,7 @@ internal sealed partial class MainWindow : IDisposable
         NativeMethods.SetWindowText(_startSubtitleText, _startSubtitle);
         Layout();
         NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
-        StartPageRenders++;
     }
-
-    /// <summary>How often the start page re-laid out and repainted the window; for the smoke harness.</summary>
-    public int StartPageRenders { get; private set; }
 
     // ---------- Commands ----------
 
