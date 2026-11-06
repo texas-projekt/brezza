@@ -1,6 +1,7 @@
 **/bin/
 **/obj/
 .store/
+.dotnet/
 .vs/
 .idea/
 *.user
