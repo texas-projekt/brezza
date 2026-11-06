@@ -162,5 +162,13 @@
   "tab.playingAudio": "Playing audio",
   "start.recent": "Recently visited",
   "start.bookmarks": "Bookmarks",
+  "notice.retry": "Try again",
+  "notice.failure.nameNotResolved": "The site's address could not be found. Check the spelling or your connection.",
+  "notice.failure.connection": "The connection to the site failed. Check your network.",
+  "notice.failure.timeout": "The site took too long to respond.",
+  "notice.failure.certificate": "The site's security certificate is not valid, so the page was not loaded.",
+  "notice.failure.server": "The site sent a response the browser could not use.",
+  "notice.failure.authentication": "The site or a proxy requires a sign-in the browser cannot provide.",
+  "notice.failure.other": "Page could not be loaded",
   "notice.saveFailed": "Browser data could not be saved"
 }

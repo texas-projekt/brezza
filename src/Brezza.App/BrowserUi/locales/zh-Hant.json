@@ -162,5 +162,13 @@
   "tab.playingAudio": "正在播放音訊",
   "start.recent": "最近造訪",
   "start.bookmarks": "書籤",
+  "notice.retry": "重試",
+  "notice.failure.nameNotResolved": "找不到該網站的位址。請檢查拼字或網路連線。",
+  "notice.failure.connection": "無法連線到該網站。請檢查網路。",
+  "notice.failure.timeout": "網站回應時間過長。",
+  "notice.failure.certificate": "該網站的安全性憑證無效，因此未載入頁面。",
+  "notice.failure.server": "網站傳回了瀏覽器無法使用的回應。",
+  "notice.failure.authentication": "網站或 Proxy 要求瀏覽器無法提供的登入資訊。",
+  "notice.failure.other": "頁面無法載入",
   "notice.saveFailed": "瀏覽器資料無法儲存"
 }

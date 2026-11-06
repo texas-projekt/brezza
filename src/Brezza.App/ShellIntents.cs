@@ -13,6 +13,18 @@ internal enum TabCommandKind
     CloseToTheRight,
 }
 
+/// <summary>The action a notice offers next to Dismiss.</summary>
+internal enum NoticeAction
+{
+    None,
+
+    /// <summary>Reload a page whose process stopped.</summary>
+    Reload,
+
+    /// <summary>Try the address that failed again.</summary>
+    Retry,
+}
+
 /// <summary>A context-menu command and the tab it was opened on.</summary>
 internal readonly struct TabCommand
 {

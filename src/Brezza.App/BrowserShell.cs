@@ -507,12 +507,12 @@ internal sealed partial class BrowserShell : IDisposable
 
     private void OnActiveHostStateChanged(object? sender, EventArgs e) => RenderState();
 
-    private void OnActiveHostFailed(object sender, EventArgs e) => SendNotice(PageStoppedNotice);
+    private void OnActiveHostFailed(object sender, EventArgs e) => SendNotice(PageStoppedNotice, action: NoticeAction.Reload);
 
     /// <summary>Clears a notice that described a page failure; other notices stay until dismissed.</summary>
     private void ClearPageFailureNotice()
     {
-        if (_noticeKey is PageFailedNotice or PageStoppedNotice) SendNotice(null);
+        if (IsPageFailureNotice(_noticeKey)) SendNotice(null);
     }
 
     /// <summary>
@@ -672,9 +672,28 @@ internal sealed partial class BrowserShell : IDisposable
         else if (_tabs?.ActiveTab?.Id == e.Tab.Id)
         {
             _window.SetWindowTitle(_localization.Get(PageFailedNotice) + " - " + _localization.Get("app.name"));
-            SendNotice(PageFailedNotice, e.Error);
+            // The notice says why in words the user can act on, names the address that failed, and
+            // offers a retry only when trying again can succeed without the user changing anything.
+            var kind = NavigationFailurePolicy.Classify(e.Error);
+            SendNotice(FailureNoticeKey(kind), e.Url,
+                NavigationFailurePolicy.IsRetryable(kind) ? NoticeAction.Retry : NoticeAction.None);
         }
     }
+
+    private static string FailureNoticeKey(NavigationFailureKind kind) => kind switch
+    {
+        NavigationFailureKind.NameNotResolved => "notice.failure.nameNotResolved",
+        NavigationFailureKind.Connection => "notice.failure.connection",
+        NavigationFailureKind.Timeout => "notice.failure.timeout",
+        NavigationFailureKind.Certificate => "notice.failure.certificate",
+        NavigationFailureKind.Server => "notice.failure.server",
+        NavigationFailureKind.Authentication => "notice.failure.authentication",
+        _ => "notice.failure.other",
+    };
+
+    private static bool IsPageFailureNotice(string? key) =>
+        key == PageStoppedNotice || key == PageFailedNotice ||
+        (key?.StartsWith("notice.failure.", StringComparison.Ordinal) ?? false);
 
     private void OnPrivateCleanupCompleted(object? sender, SessionCleanupResult result)
     {
@@ -726,12 +745,14 @@ internal sealed partial class BrowserShell : IDisposable
     // failure raised and leave unrelated notices (downloads, permissions) in place.
     private string? _noticeKey;
     private string? _noticeDetail;
+    private NoticeAction _noticeAction;
 
-    private void SendNotice(string? key, string? detail = null)
+    private void SendNotice(string? key, string? detail = null, NoticeAction action = NoticeAction.None)
     {
         _noticeKey = key;
         _noticeDetail = detail;
-        _window.SetNotice(key, detail);
+        _noticeAction = action;
+        _window.SetNotice(key, detail, action);
     }
 
     // ---------- Shutdown ----------

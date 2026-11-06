@@ -144,7 +144,7 @@ internal sealed partial class BrowserShell
             _localization.LoadLanguage(EffectiveLanguage);
             _window.ApplyLanguage();
             _panel?.ApplyLanguage();
-            if (_noticeKey is not null) _window.SetNotice(_noticeKey, _noticeDetail);
+            if (_noticeKey is not null) _window.SetNotice(_noticeKey, _noticeDetail, _noticeAction);
             RenderState();
             // The theme goes last: its synchronous repaint then shows the new language and palette
             // together. Every window follows the shared source; nothing is pushed per window.

@@ -162,5 +162,13 @@
   "tab.playingAudio": "正在播放音频",
   "start.recent": "最近访问",
   "start.bookmarks": "书签",
+  "notice.retry": "重试",
+  "notice.failure.nameNotResolved": "找不到该网站的地址。请检查拼写或网络连接。",
+  "notice.failure.connection": "无法连接到该网站。请检查网络。",
+  "notice.failure.timeout": "网站响应时间过长。",
+  "notice.failure.certificate": "该网站的安全证书无效，因此未加载页面。",
+  "notice.failure.server": "网站返回了浏览器无法使用的响应。",
+  "notice.failure.authentication": "网站或代理要求浏览器无法提供的登录信息。",
+  "notice.failure.other": "页面无法加载",
   "notice.saveFailed": "浏览器数据无法保存"
 }

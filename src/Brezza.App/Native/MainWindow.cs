@@ -608,7 +608,7 @@ internal sealed partial class MainWindow : IDisposable
         NativeMethods.SendMessage(target, NativeMethods.EM_SETSEL, IntPtr.Zero, new IntPtr(-1));
     }
 
-    public void SetNotice(string? key, string? detail)
+    public void SetNotice(string? key, string? detail, NoticeAction action = NoticeAction.None)
     {
         if (_hwnd == IntPtr.Zero) return;
         if (string.IsNullOrEmpty(key))
@@ -624,10 +624,14 @@ internal sealed partial class MainWindow : IDisposable
         if (!string.IsNullOrEmpty(detail)) text += " (" + detail + ")";
         NativeMethods.SetWindowText(_noticeText, text);
 
-        // Only recoverable failures offer a reload action.
-        var canReload = string.Equals(key, "notice.pageStopped", StringComparison.Ordinal) ||
-            string.Equals(key, "notice.navigationFailed", StringComparison.Ordinal);
-        ShowControls(canReload, _noticeActionButton);
+        // The shell decides whether a notice is recoverable; the button only says how.
+        if (action != NoticeAction.None)
+        {
+            NativeMethods.SetWindowText(_noticeActionButton,
+                _localization.Get(action == NoticeAction.Retry ? "notice.retry" : "notice.reload"));
+        }
+
+        ShowControls(action != NoticeAction.None, _noticeActionButton);
         ShowControls(true, _noticeText, _noticeDismissButton);
         _noticeVisible = true;
         Layout();

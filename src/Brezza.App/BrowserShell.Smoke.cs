@@ -57,11 +57,11 @@ internal sealed partial class BrowserShell
         await WaitForPageAsync(pageUri);
         Check(string.Equals(_window.AddressText, pageUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase), "the address field does not show the page");
 
-        // A missing page raises a failure notice that offers Reload.
+        // A missing page raises a failure notice that offers Try again.
         var missing = new Uri(new Uri(pageUri, "."), "missing.html");
         await NavigateAsync(missing.AbsoluteUri);
         await WaitForAsync(() => _window.IsNoticeVisible);
-        Check(_window.IsControlVisible(MainWindow.IdNoticeAction), "the failure notice offers no Reload");
+        Check(_window.IsControlVisible(MainWindow.IdNoticeAction), "the failure notice offers no Try again");
         _window.InvokeCommand(MainWindow.IdNoticeDismiss);
         await NavigateAsync(pageUri.AbsoluteUri);
         await WaitForPageAsync(pageUri);

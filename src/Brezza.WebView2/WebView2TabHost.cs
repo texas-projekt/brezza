@@ -792,8 +792,21 @@ public sealed class WebView2TabHost : ITabHost
             return;
         }
 
+        // The site answered with an HTTP error status (404, 500, ...). The runtime reports that as
+        // unsuccessful, but the page the site sent, or the runtime's own error page for an empty
+        // answer, is what the user sees: the site's response, not a browser failure.
+        if (!args.IsSuccess && IsSiteResponse(args))
+        {
+            CompleteNavigation(true, args.WebErrorStatus.ToString(), args.NavigationId);
+            return;
+        }
+
         CompleteNavigation(args.IsSuccess, args.WebErrorStatus.ToString(), args.NavigationId);
     }
+
+    private static bool IsSiteResponse(CoreWebView2NavigationCompletedEventArgs args) =>
+        args.HttpStatusCode >= 400 &&
+        args.WebErrorStatus is not (CoreWebView2WebErrorStatus.OperationCanceled or CoreWebView2WebErrorStatus.ConnectionAborted);
 
     private async Task ReportAbortedNavigationAsync(ulong navigationId, string status)
     {
