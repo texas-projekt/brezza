@@ -698,6 +698,52 @@ public sealed class TabRuntimeManagerTests
     }
 
     [Fact]
+    public async Task Closing_a_tab_that_is_already_gone_does_nothing()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        await ActivateWithHostAsync(manager, factory, tab.Id);
+        await manager.CloseAsync(tab.Id);
+
+        // A second Ctrl+W or a click on a tab that just closed must not fail.
+        await manager.CloseAsync(tab.Id);
+        await manager.CloseAsync("tab-unknown");
+
+        Assert.Empty(registry.Tabs);
+    }
+
+    [Fact]
+    public async Task A_second_close_during_host_creation_does_not_close_the_tab_twice()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/");
+        var next = registry.Create("https://example.com/next");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+
+        var activating = manager.ActivateAsync(tab.Id);
+        var first = manager.CloseAsync(tab.Id);
+        var second = manager.CloseAsync(tab.Id);
+        await second;
+        var host = factory.Complete();
+
+        // Closing activates the next tab, which creates its host; complete that one too.
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (factory.CreateCount < 2 && DateTime.UtcNow < deadline) await Task.Delay(10);
+        factory.Complete();
+        await first;
+        await activating;
+
+        Assert.True(host.IsDisposed);
+        Assert.False(registry.Contains(tab.Id));
+        Assert.Equal(next.Id, registry.ActiveTab?.Id);
+        // One close, so the next tab gets one host creation, not one per close.
+        Assert.Equal(2, factory.CreateCount);
+    }
+
+    [Fact]
     public async Task Stop_reaches_only_the_active_host()
     {
         var registry = new TabRegistry();

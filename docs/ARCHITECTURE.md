@@ -24,7 +24,10 @@ Large types are partial classes split by concern: `BrowserShell` (`.Panels`, `.D
 **State.** `TabRegistry` owns tabs and the active tab; `DownloadRegistry` owns the download list. The
 UI renders snapshots and sends commands. `TabRuntimeManager` alone creates, activates, sleeps, and
 closes hosts; concurrent activation shares one creation, and a host that finishes after its tab
-closed is closed at once.
+closed is closed at once. Closing a tab that is gone or already closing does nothing. There is always
+one tab: when the last one closes, the shell creates its replacement first and the closing tab hands
+over to it, so the strip is never empty. `TabRegistry.Create` can place a tab after another, which is
+where duplicates and popups go.
 
 **Hosts.** A tab with no URL has no host. At most eight inactive hosts stay alive; an inactive host
 sleeps after ten minutes unless it is loading, playing audio, full-screen, or downloading. Waking

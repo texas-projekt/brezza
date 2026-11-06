@@ -514,12 +514,14 @@ internal sealed partial class MainWindow : IDisposable
     /// Updates the navigation buttons. While the page loads, the reload button stops the load
     /// instead, as in other browsers, so one place in the toolbar answers "is this page done".
     /// </summary>
-    public void UpdateNavigationState(bool canGoBack, bool canGoForward, bool loading = false)
+    public void UpdateNavigationState(bool canGoBack, bool canGoForward, bool loading = false, bool canReload = false)
     {
         if (_hwnd == IntPtr.Zero) return;
         NativeMethods.EnableWindow(_backButton, canGoBack);
         NativeMethods.EnableWindow(_forwardButton, canGoForward);
-        NativeMethods.EnableWindow(_reloadButton, loading || _currentUrl.Length > 0);
+        // The address is set after this, so it belongs to the tab rendered before. Only a live page
+        // can be reloaded: a new-tab page has nothing to reload, whatever was showing before it.
+        NativeMethods.EnableWindow(_reloadButton, loading || canReload);
         if (_loading == loading) return;
         _loading = loading;
         ApplyReloadButton();
@@ -680,6 +682,14 @@ internal sealed partial class MainWindow : IDisposable
     public bool IsNewTabPageVisible => _startPageVisible;
 
     public bool IsNoticeVisible => _noticeVisible;
+
+    public string WindowTitleText => _hwnd == IntPtr.Zero ? string.Empty : NativeMethods.GetWindowText(_hwnd);
+
+    public bool IsControlEnabled(int controlId)
+    {
+        var control = GetControl(controlId);
+        return control != IntPtr.Zero && NativeMethods.IsWindowEnabled(control);
+    }
 
     public string NoticeText => _noticeText == IntPtr.Zero ? string.Empty : NativeMethods.GetWindowText(_noticeText);
 

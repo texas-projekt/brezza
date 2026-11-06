@@ -277,14 +277,19 @@ internal sealed partial class BrowserShell : IDisposable
 
     private async Task CloseTabAsync(string tabId)
     {
-        if (_tabs is null || _runtime is null) return;
-        await _runtime.CloseAsync(tabId);
-        if (_tabs.Tabs.Count == 0)
+        if (_tabs is null || _runtime is null || !_tabs.Contains(tabId)) return;
+        ClosePanel();
+
+        // The browser always keeps one tab. When the last one closes, its replacement, a normal
+        // new tab, is created first and the closing tab hands over to it, so the window never
+        // renders an empty strip and private-session cleanup still runs as the private tab goes.
+        if (_tabs.Tabs.Count == 1)
         {
-            var newTab = _tabs.Create();
-            await _runtime.ActivateAsync(newTab.Id, waitForNavigation: false);
+            var replacement = _tabs.Create(afterTabId: tabId);
+            await _runtime.ActivateAsync(replacement.Id, waitForNavigation: false);
         }
 
+        await _runtime.CloseAsync(tabId);
         RenderState();
     }
 
@@ -303,7 +308,7 @@ internal sealed partial class BrowserShell : IDisposable
                 _runtime.Reload();
                 break;
             case TabCommandKind.Duplicate:
-                var copy = _tabs.Create(target.Url, target.SessionKind);
+                var copy = _tabs.Create(target.Url, target.SessionKind, afterTabId: target.Id);
                 await _runtime.ActivateAsync(copy.Id, waitForNavigation: false);
                 break;
             case TabCommandKind.Close:
@@ -361,7 +366,7 @@ internal sealed partial class BrowserShell : IDisposable
                 e.Handled = true;
                 var count = _tabs.Tabs.Count;
                 var index = (_tabs.Tabs.ToList().FindIndex(tab => tab.Id == current.Id) + (e.Shift ? count - 1 : 1)) % count;
-                Observe(async () => await _runtime.ActivateAsync(_tabs.Tabs[index].Id));
+                Observe(async () => await ActivateTabAsync(_tabs.Tabs[index].Id));
             }
             else if (e.VirtualKey == 0x54)
             {
@@ -412,7 +417,7 @@ internal sealed partial class BrowserShell : IDisposable
                 if (index < _tabs.Tabs.Count)
                 {
                     e.Handled = true;
-                    Observe(async () => await _runtime.ActivateAsync(_tabs.Tabs[index].Id));
+                    Observe(async () => await ActivateTabAsync(_tabs.Tabs[index].Id));
                 }
             }
         }
@@ -452,11 +457,13 @@ internal sealed partial class BrowserShell : IDisposable
         var loading = host?.IsLoading == true;
         _favicons?.Sync(_tabs.Tabs);
         _window.UpdateTabs(_tabs.Tabs, active?.Id, loading);
-        _window.UpdateNavigationState(host?.CanGoBack ?? false, host?.CanGoForward ?? false, loading);
+        _window.UpdateNavigationState(host?.CanGoBack ?? false, host?.CanGoForward ?? false, loading,
+            canReload: !string.IsNullOrWhiteSpace(active?.Url));
         _window.SetBookmarked(bookmarked);
         _window.SetAddressText(active?.Url ?? string.Empty);
 
-        var title = active?.Title?.Trim() ?? string.Empty;
+        // The window title names the tab the way its strip label does, in the user's language.
+        var title = active is null ? string.Empty : _window.TabLabel(active);
         _window.SetWindowTitle(title.Length == 0
             ? _localization.Get("app.name")
             : title + " - " + _localization.Get("app.name"));
@@ -568,7 +575,8 @@ internal sealed partial class BrowserShell : IDisposable
         Observe(async () =>
         {
             if (_tabs is null || _runtime is null) return;
-            var tab = _tabs.Create(sessionKind: e.SessionKind);
+            // The popup opens next to the tab that asked for it, not at the far end of the strip.
+            var tab = _tabs.Create(sessionKind: e.SessionKind, afterTabId: e.TabId);
             await _runtime.ActivateAsync(tab.Id, waitForNavigation: false);
             if (target is not null)
             {

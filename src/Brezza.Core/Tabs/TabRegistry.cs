@@ -15,7 +15,12 @@ public sealed class TabRegistry
 
     public BrowserTab? ActiveTab { get; private set; }
 
-    public BrowserTab Create(string? initialUrl = null, BrowserSessionKind sessionKind = BrowserSessionKind.Normal)
+    /// <summary>
+    /// Creates a tab at the end of the strip, or right after <paramref name="afterTabId"/> when that
+    /// tab exists, the way a duplicated tab or a popup sits next to the tab it came from.
+    /// </summary>
+    public BrowserTab Create(string? initialUrl = null, BrowserSessionKind sessionKind = BrowserSessionKind.Normal,
+        string? afterTabId = null)
     {
         string id;
         do
@@ -25,7 +30,9 @@ public sealed class TabRegistry
         while (_tabs.Any(tab => tab.Id == id));
 
         var tab = new BrowserTab(id, initialUrl, sessionKind);
-        _tabs.Add(tab);
+        var anchor = afterTabId is null ? -1 : _tabs.FindIndex(existing => existing.Id == afterTabId);
+        if (anchor >= 0) _tabs.Insert(anchor + 1, tab);
+        else _tabs.Add(tab);
         Changed?.Invoke(this, EventArgs.Empty);
         return tab;
     }

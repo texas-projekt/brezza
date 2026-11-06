@@ -364,6 +364,9 @@ internal sealed partial class MainWindow
         return Truncate(title);
     }
 
+    /// <summary>The label a tab shows in the strip, without the loading marker.</summary>
+    public string TabLabel(BrowserTab tab) => DisplayTitle(tab).Trim();
+
     /// <summary>
     /// A tab's label. A private tab already carries its privacy mark as its leading icon, so its
     /// label stays the page's own title: a second "private" word in the label would repeat the mark.

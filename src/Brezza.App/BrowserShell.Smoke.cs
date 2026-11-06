@@ -72,6 +72,21 @@ internal sealed partial class BrowserShell
         _window.InvokeCommand(MainWindow.IdCloseActiveTab);
         await WaitForAsync(() => _tabs?.Tabs.Count == 1 && _window.TabCount == 1);
 
+        // A duplicate opens right after the tab it copies, and the window title is the tab's label.
+        _window.InvokeCommand(MainWindow.IdNewTab);
+        await WaitForAsync(() => _tabs?.Tabs.Count == 2);
+        Check(_window.WindowTitleText.StartsWith(_localization.Get("tab.new"), StringComparison.Ordinal),
+            "a new tab's window title is not its label: " + _window.WindowTitleText);
+        Check(!_window.IsControlEnabled(MainWindow.IdReload), "reload is enabled on a new-tab page");
+        var original = _tabs!.Tabs[0];
+        await RunTabCommandAsync(new TabCommand(original.Id, TabCommandKind.Duplicate));
+        await WaitForAsync(() => _tabs.Tabs.Count == 3);
+        Check(_tabs.Tabs[1].Url == original.Url && string.IsNullOrEmpty(_tabs.Tabs[2].Url),
+            "the duplicate did not open next to the tab it copies");
+        await RunTabCommandAsync(new TabCommand(_tabs.Tabs[1].Id, TabCommandKind.CloseOthers));
+        await WaitForAsync(() => _tabs.Tabs.Count == 1 && _window.TabCount == 1);
+        await WaitForPageAsync(pageUri);
+
         // Panels open over the page and close again; the page keeps its host.
         foreach (var command in new[] { MainWindow.IdSettings, MainWindow.IdHistory, MainWindow.IdBookmarks, MainWindow.IdDownloads })
         {
@@ -94,6 +109,28 @@ internal sealed partial class BrowserShell
         _window.InvokeCommand(MainWindow.IdCloseActiveTab);
         await WaitForAsync(() => !Directory.Exists(privateProfile), TimeSpan.FromSeconds(20));
 
+        // Closing the only tab, a private one, leaves one normal new tab and never an empty strip.
+        _window.InvokeCommand(MainWindow.IdCloseActiveTab);
+        await WaitForAsync(() => _tabs?.Tabs.Count == 1 && string.IsNullOrEmpty(_tabs.ActiveTab?.Url));
+        _window.InvokeCommand(MainWindow.IdNewPrivateTab);
+        await WaitForAsync(() => _tabs?.Tabs.Count == 2);
+        _window.InvokeCommand(MainWindow.IdCloseActiveTab);
+        await WaitForAsync(() => _tabs?.Tabs.Count == 1);
+        var onlyPrivate = _tabs!.Tabs[0];
+        MiddleClickTab(0);
+        await WaitForAsync(() => _tabs.Tabs.Count == 1 && _tabs.ActiveTab?.Id != onlyPrivate.Id);
+        Check(_tabs.ActiveTab?.SessionKind == BrowserSessionKind.Normal && _window.TabCount == 1 &&
+            _window.IsControlVisible(MainWindow.IdCloseActiveTab), "closing the last tab left no normal tab");
+        _window.InvokeCommand(MainWindow.IdNewPrivateTab);
+        await WaitForAsync(() => _tabs.Tabs.Count == 2 && _tabs.ActiveTab?.SessionKind == BrowserSessionKind.Private);
+        MiddleClickTab(0);
+        await WaitForAsync(() => _tabs.Tabs.Count == 1);
+        _window.InvokeCommand(MainWindow.IdCloseActiveTab);
+        await WaitForAsync(() => _tabs.Tabs.Count == 1 && _tabs.ActiveTab?.SessionKind == BrowserSessionKind.Normal);
+        Check(_window.TabCount == 1, "the strip and Core disagree after the last private tab closed");
+        await NavigateAsync(pageUri.AbsoluteUri);
+        await WaitForPageAsync(pageUri);
+
         // One real download is written, recorded, and kept for the restore run.
         var download = Environment.GetEnvironmentVariable("BREZZA_SMOKE_DOWNLOAD_PAGE") ?? throw new InvalidOperationException("BREZZA_SMOKE_DOWNLOAD_PAGE is missing.");
         await NavigateAsync(download);
@@ -105,6 +142,17 @@ internal sealed partial class BrowserShell
         // Leave the session on the page so the restore run can reopen it.
         await NavigateAsync(pageUri.AbsoluteUri);
         await WaitForPageAsync(pageUri);
+    }
+
+    /// <summary>Closes a tab with a middle-click on its strip item, the way a mouse does.</summary>
+    private void MiddleClickTab(int index)
+    {
+        var strip = _window.GetControl(MainWindow.IdTabs);
+        var rect = new NativeMethods.RECT();
+        NativeMethods.SendMessage(strip, NativeMethods.TCM_GETITEMRECT, new IntPtr(index), ref rect);
+        var position = new IntPtr(NativeMethods.MakeLong(rect.left + 6, rect.top + Math.Max(1, rect.Height / 2)));
+        NativeMethods.SendMessage(strip, NativeMethods.WM_MBUTTONDOWN, new IntPtr(0x0010), position);
+        NativeMethods.SendMessage(strip, NativeMethods.WM_MBUTTONUP, IntPtr.Zero, position);
     }
 
     private Task WaitForPageAsync(Uri pageUri) => WaitForAsync(() =>

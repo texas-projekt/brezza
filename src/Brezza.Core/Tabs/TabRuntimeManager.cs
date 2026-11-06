@@ -110,9 +110,14 @@ public sealed class TabRuntimeManager
 
     public async Task CloseAsync(string tabId)
     {
-        if (_disposed) return;
+        // A tab that is gone, or already closing, has nothing left to close. A repeated Ctrl+W or a
+        // click on a tab that is closing would otherwise fail, or close the tab and activate the
+        // next one twice.
+        if (_disposed || !_registry.Contains(tabId)) return;
+        var closing = _registry.Find(tabId);
+        if (closing.State == TabRuntimeState.Closing) return;
         var wasActive = _registry.ActiveTab?.Id == tabId;
-        var sessionKind = _registry.Find(tabId).SessionKind;
+        var sessionKind = closing.SessionKind;
         if (wasActive)
         {
             ActiveHost = null;

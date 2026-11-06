@@ -22,8 +22,9 @@ start if the runtime is missing.
   until you do. A new tab puts the cursor there.
 - **New-tab page:** lists recent pages and bookmarks.
 - **Tabs:** close a tab from the × it shows on hover, with a middle-click, or with Ctrl+W.
-  Right-click a tab to reload, duplicate, or close it, the others, or the tabs to its right. A tab
-  playing sound shows a speaker.
+  Right-click a tab to reload, duplicate, or close it, the others, or the tabs to its right. A
+  duplicate or a popup opens next to the tab it came from. Closing the last tab, private or not,
+  leaves one new normal tab. A tab playing sound shows a speaker.
 - **Loading:** while a page loads, the reload button stops it. When a page cannot load, the notice
   says why and offers Try again when that can help.
 - **Private tabs:** not saved to history or the session; their cookies and site data are deleted
