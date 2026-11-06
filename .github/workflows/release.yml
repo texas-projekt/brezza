@@ -53,7 +53,7 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "prerelease=$(if ($tag -match '-') { 'true' } else { 'false' })" >> $env:GITHUB_OUTPUT
 
-      # The merge runs here; the packaged executable is what ships (ADR 0009).
+      # The merge runs here; the packaged executable is what ships (docs/ARCHITECTURE.md, Decisions).
       # The launch check is skipped because a CI runner has no interactive desktop.
       - run: >-
           pwsh tools/package.ps1

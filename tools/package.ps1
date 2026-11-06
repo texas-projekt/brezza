@@ -59,7 +59,7 @@ try {
 
     # The managed assemblies merge into one executable. The native WebView2 loader and the language
     # packs cannot merge: Windows loads a native DLL from disk and the language packs are content
-    # files (ADR 0009). ILRepack runs from the repository's pinned local tool, without /internalize:
+    # files (docs/ARCHITECTURE.md, Decisions). ILRepack runs from the repository's pinned local tool, without /internalize:
     # internalizing the WebView2 interop types breaks its event registration at runtime.
     # The merged output takes its assembly name from the file name, so it must be written as
     # Brezza.exe: merging to any other name leaves the assembly identity wrong and the WebView2

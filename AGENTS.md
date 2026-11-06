@@ -1,11 +1,10 @@
 # Brezza Project Rules
 
-- Keep product scope in `docs/PRODUCT.md`, architecture in `docs/ARCHITECTURE.md`, decisions in `docs/decisions/`, and delivery status in `docs/ROADMAP.md`.
-- Update the relevant document when a code change alters an interface, ownership rule, product commitment, or milestone acceptance criterion.
-- Preserve the dependency direction: App may depend on Core, WebView2, and Persistence; WebView2 and Persistence may depend on Core; Core has no project dependencies.
-- The browser UI is native Win32 (ADR 0007): the window, tab strip, address/search field, navigation buttons, notices, and settings/history/bookmark panels are real HWND controls owned by `Brezza.App` through P/Invoke. WebView2 renders website content only. Do not reintroduce WPF, WinForms control abstractions, WinUI, Avalonia, or Electron for browser UI, and do not render browser chrome as HTML in a WebView2 surface.
-- Core owns browser state and policy. UI code renders state and sends commands; it must not own a second authoritative copy.
-- Do not expose WebView2 objects or general-purpose script execution to remote page content. Content hosts keep the message bridge disabled and register no message handler.
-- Keep async lifecycle operations observable. Do not discard tasks that can fail without an explicit error-handling path.
-- Do not add frameworks or packages without recording the need in a decision record.
-- Before finishing a change, run the narrowest relevant build or test and report any check that could not run.
+- There are two project documents. A user-visible change updates `README.md`. A change to an interface, an ownership rule, an invariant, or a decision updates `docs/ARCHITECTURE.md`, and a new decision gets an entry there. Do not add other docs.
+- Dependency direction: App → Core, WebView2, Persistence; WebView2 → Core; Persistence → Core; Core has no project references.
+- Browser chrome is native Win32 HWND controls owned by `Brezza.App` through P/Invoke. WebView2 renders website content only. Do not add WPF, WinForms controls, WinUI, Avalonia, or Electron, and do not render chrome as HTML.
+- Core owns browser state and policy. UI code renders state and sends commands; it never keeps a second authoritative copy.
+- Content hosts keep the message bridge disabled and register no message handler. Never expose WebView2 objects or general script execution to page content.
+- Do not discard async tasks that can fail; every one needs an error path (`Observe` in the shell).
+- No new frameworks or packages without a decision entry in `docs/ARCHITECTURE.md`.
+- Before finishing, run the narrowest relevant check (`dotnet test tests/Brezza.Core.Tests`, plus `pwsh tools/smoke.ps1` for shell changes) and report anything that could not run. Put behavior details in unit tests; keep the smoke to the main paths.

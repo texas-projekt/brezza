@@ -1,49 +1,83 @@
 # Brezza
 
-Brezza is a lightweight Windows browser built around a search-first workflow. Its shell is native Win32: the window, tab strip, address/search field, navigation buttons, notices, and settings/history/bookmark panels are real HWND controls, and WebView2 renders only website content in a separate surface. Search navigation, tabs, settings, local history, bookmarks, opt-in session restore, isolated private tabs, native System/Light/Dark themes, English/Simplified/Traditional Chinese chrome, and the x64 framework-dependent package are implemented and smoke-tested. A second launch activates the one existing window instead of opening another profile tree. Downloads are written to the downloads folder and managed in a downloads panel (Ctrl+J): the list is kept across sessions, a completed file or its folder is opened from the panel, and a private download is listed only while its private session is open and never saved; a page may run three downloads at once and a known size over 8 GiB is refused. Popup destinations open as tabs, and permission requests are denied with a notice until approval UI is added.
+Brezza is a lightweight, search-first browser for Windows. One field takes a search or an address,
+and the rest of the window stays out of the way. The window and all browser controls are native
+Windows controls; web pages are rendered by Microsoft Edge WebView2.
 
-## Build and test
+## Install
 
-Building requires the .NET 10 SDK. The .NET Framework 4.8 reference assemblies are restored from NuGet. Running Brezza requires Windows with .NET Framework 4.8 and the Evergreen WebView2 Runtime. User data defaults to `%LOCALAPPDATA%\Brezza`; `BREZZA_DATA_DIR` can override it for isolated development runs.
+Requires Windows 10 or 11 (x64) with .NET Framework 4.8 and the
+[WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). Brezza tells you on
+start if the runtime is missing.
+
+1. Download `Brezza-<version>-win-x64-native.zip` and its `.sha256` file from
+   [Releases](https://github.com/texas-projekt/brezza/releases).
+2. Releases are not code-signed, so check the archive first: the output of
+   `(Get-FileHash <zip> -Algorithm SHA256).Hash` must match the `.sha256` file.
+3. Extract it anywhere and run `Brezza.exe`. Nothing is installed.
+
+## Using Brezza
+
+- **Search or go:** type into the address field and press Enter. Nothing reaches the search provider
+  until you do. A new tab puts the cursor there.
+- **New-tab page:** lists recent pages and bookmarks.
+- **Tabs:** close a tab from the × it shows on hover, with a middle-click, or with Ctrl+W.
+  Right-click a tab to reload, duplicate, or close it, the others, or the tabs to its right. A tab
+  playing sound shows a speaker.
+- **Loading:** while a page loads, the reload button stops it. When a page cannot load, the notice
+  says why and offers Try again when that can help.
+- **Private tabs:** not saved to history or the session; their cookies and site data are deleted
+  when the last private tab closes. Downloaded files still go to your downloads folder.
+- **Panels:** history, downloads, bookmarks, cookies, browsing data, and settings open from the ···
+  menu. Downloads can be paused, resumed, and cancelled; up to three run at once, and a file known to
+  exceed 8 GiB is refused.
+- **Settings:** search provider, language (English, Simplified or Traditional Chinese), theme, what
+  opens on start, and the downloads folder.
+
+| Shortcut | Action |
+|---|---|
+| Ctrl+T / Ctrl+Shift+N | New tab / new private tab |
+| Ctrl+W | Close tab |
+| Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+1…9 | Switch tabs |
+| Ctrl+L, Ctrl+K | Address field |
+| F5 / Esc | Reload / stop |
+| Alt+Left / Alt+Right | Back / forward |
+| Ctrl+D | Bookmark the page |
+| Ctrl+H, Ctrl+J, Ctrl+Shift+Delete, Alt+F | History, downloads, browsing data, menu |
+
+## Privacy
+
+- Your data stays in `%LOCALAPPDATA%\Brezza`. No accounts, sync, or telemetry.
+- Pages cannot talk to the browser and cannot open other applications without your click.
+- Permission requests (camera, location, …) are denied with a notice; there is no prompt yet.
+- Clearing history, cookies, browsing data, or the download list asks first. Clearing the download
+  list never deletes the files.
+
+Not available yet: permission prompts, find in page, zoom, printing, a bookmarks bar, drag and drop.
+Report bugs as [issues](https://github.com/texas-projekt/brezza/issues); report security problems
+privately to the maintainer instead.
+
+## Development
+
+Needs Windows and the .NET 10 SDK pinned in `global.json`. How the code is organized, its rules, and
+the decisions behind them are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```powershell
-dotnet restore Brezza.slnx --locked-mode
 dotnet build Brezza.slnx -c Release
+dotnet test tests/Brezza.Core.Tests -c Release     # every change; also runs in CI
+pwsh tools/smoke.ps1                               # after changing the shell, tabs, panels, or navigation
+pwsh tools/package.ps1 -Version 1.0.0              # before a release
 ```
 
-`global.json` pins the .NET 10 SDK feature band and `packages.lock.json` is committed. After changing a
-package reference, run `dotnet restore Brezza.slnx --force-evaluate` once to update the lock files.
+The unit tests cover Core, Persistence, and the language packs. The smoke drives the real window
+through the main paths in about 20 seconds. The smoke and the package launch check need an
+interactive desktop and no other Brezza window open. `BREZZA_DATA_DIR` points the browser at another
+data folder.
 
-`tools/test.ps1` is the single entry point for the test suite. `-Stage` picks one layer — `Unit`, `Smoke`, `Package`, or `Visual` — and the default `All` runs them in order, stopping at the first failure:
+Commits follow Conventional Commits. A `v<semver>` tag builds a GitHub Release; write its notes by
+hand from the commits since the last tag.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\test.ps1
-```
+## License
 
-- `Unit` runs the Core and persistence tests (`dotnet test tests/Brezza.Core.Tests`) and writes TRX results to `artifacts/test-results/`.
-- `Smoke` builds Debug and runs the Windows integration smoke, which uses a Debug-only in-process driver that exercises the real native controls against an isolated local page. Its inspection switches are parameters (`-LongNotice`, `-PauseAfterFailureMs`, `-PauseAfterSettingsMs`, `-PauseAfterHistoryMs`, `-PauseAfterBookmarksMs`, `-Keep`).
-- `Package` runs the x64 framework-dependent packager, which verifies an extracted ZIP; `-PackageVersion` names the archive and `-SkipLaunchVerification` skips the launch check. Releases are unsigned by decision; integrity comes from the SHA256 sidecar and GitHub build provenance.
-- `Visual` builds Debug and captures the automatable part of the native UI baseline in one pass. It needs an interactive desktop, takes a few minutes, and produces screenshots for review rather than a pass or fail; `-VisualOnly <Scenario>` captures a single one (see [UI Visual Baseline](docs/UI_VISUAL_BASELINE.md)).
-
-CI calls the same entry point (`tools/test.ps1 -Stage Unit`) for the stage its runners can run. The test layers, conventions, and when to run each are described in [Testing](docs/TESTING.md).
-
-`BREZZA_TRACE_LOG` optionally writes diagnostic trace output to a file, which is useful when investigating native lifetime problems.
-
-For a visual check of the native shell, run `tools/capture-window.ps1 -Scenario <Name>`; the preset owns the window class, canonical geometry, focus, and output file, and the script writes a PNG under `artifacts/` without requiring a UI framework or browser-page bridge. Use `-Scenario MinimumWindow` for the 640×420 minimum-window check, and repeat at the machine's 125%/150% display scale for DPI comparison. The available scenarios are listed in [UI Visual Baseline](docs/UI_VISUAL_BASELINE.md).
-
-## Project Map
-
-- `src/Brezza.App`: native Win32 shell (window, controls, message loop, localization, native panels) and composition root.
-- `src/Brezza.Core`: browser state and policies, independent of Win32 and WebView2.
-- `src/Brezza.WebView2`: WebView2 runtime adapter that hosts controllers in HWNDs.
-- `src/Brezza.Persistence`: local persistence implementations.
-- `tests/Brezza.Core.Tests`: Core and persistence tests.
-- `tools/test.ps1`: the single entry point for the unit tests, the Windows smoke, and the package check.
-- `tools/smoke.ps1`: isolated Windows native-control integration smoke test.
-- `tools/capture-window.ps1`: scenario-driven window capture for the visual baseline (`-Scenario`).
-- `tools/package.ps1`: x64 framework-dependent packaging and extracted-package verification.
-- `docs/`: product definition, architecture, decisions, roadmap, changelog, the testing guide, the [project assessment](docs/ASSESSMENT.md) with its repair progress, and the [unscheduled backlog](docs/BACKLOG.md).
-
-See [Product Definition](docs/PRODUCT.md), [Architecture](docs/ARCHITECTURE.md), and [Roadmap](docs/ROADMAP.md) before changing product or system boundaries.
-
-The screenshot scenarios and review criteria are listed in [UI Visual Baseline](docs/UI_VISUAL_BASELINE.md).
+[Apache-2.0](LICENSE). The release also includes the Microsoft WebView2 SDK license in
+`THIRD-PARTY-NOTICES.txt`.
