@@ -151,5 +151,16 @@
   "window.restore": "還原",
   "window.close": "關閉",
   "toolbar.menu": "設定及其他",
-  "toolbar.menuShortcut": "設定及其他 (Alt+F)"
+  "toolbar.menuShortcut": "設定及其他 (Alt+F)",
+  "toolbar.stop": "停止",
+  "toolbar.stopShortcut": "停止載入 (Esc)",
+  "tab.menu.reload": "重新載入",
+  "tab.menu.duplicate": "複製分頁",
+  "tab.menu.close": "關閉分頁",
+  "tab.menu.closeOthers": "關閉其他分頁",
+  "tab.menu.closeRight": "關閉右側分頁",
+  "tab.playingAudio": "正在播放音訊",
+  "start.recent": "最近造訪",
+  "start.bookmarks": "書籤",
+  "notice.saveFailed": "瀏覽器資料無法儲存"
 }

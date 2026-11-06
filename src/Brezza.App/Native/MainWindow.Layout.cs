@@ -206,14 +206,61 @@ internal sealed partial class MainWindow
 
     private void LayoutStartPage(ContentBounds bounds)
     {
-        var width = Math.Min(bounds.Width - Scale(64), Scale(560));
+        var hasEntries = _startEntries.Recent.Count + _startEntries.Bookmarks.Count > 0;
+        var width = Math.Min(bounds.Width - Scale(64), Scale(hasEntries ? 720 : 560));
         var left = (bounds.Width - width) / 2;
         var titleHeight = NativeFonts.Measure(_hwnd, _fonts.Display, "Ag").y + Scale(4);
-        var titleTop = bounds.Y + Math.Max(Scale(32), bounds.Height * 3 / 10);
+        // With shortcuts below it the title sits higher, so both columns fit in a default window.
+        var titleTop = bounds.Y + Math.Max(Scale(32), bounds.Height * (hasEntries ? 2 : 3) / 10);
         NativeMethods.MoveWindow(_startTitleText, left, titleTop, width, titleHeight, true);
-        NativeMethods.MoveWindow(_startSubtitleText, left, titleTop + titleHeight + Scale(12), width, Scale(96), true);
+        var subtitleTop = titleTop + titleHeight + Scale(12);
+        var lineHeight = NativeFonts.Measure(_hwnd, _fonts.Body, "Ag").y;
+        var subtitleHeight = hasEntries ? lineHeight * 3 : Scale(96);
+        NativeMethods.MoveWindow(_startSubtitleText, left, subtitleTop, width, subtitleHeight, true);
         ShowControls(_startPageVisible, _startTitleText, _startSubtitleText);
+
+        // Two columns of shortcuts, recent pages beside bookmarks. A column with no entries is not
+        // shown. Columns are capped at a readable width and centered as a group under the title, so
+        // one short column does not hug the left edge of a wide page.
+        var columns = new[]
+        {
+            (Header: _startRecentHeader, First: 0, Count: _startEntries.Recent.Count),
+            (Header: _startBookmarksHeader, First: StartEntrySlots, Count: _startEntries.Bookmarks.Count),
+        };
+        var shown = columns.Count(column => column.Count > 0);
+        var gap = Scale(NativeMetrics.SpaceXLarge);
+        var columnWidth = shown == 0 ? 0 : Math.Min(Scale(StartColumnMaximumWidth), (width - gap * (shown - 1)) / shown);
+        var groupWidth = shown == 0 ? 0 : columnWidth * shown + gap * (shown - 1);
+        var columnLeft = (bounds.Width - groupWidth) / 2;
+        var sectionTop = subtitleTop + subtitleHeight + Scale(NativeMetrics.SpaceLarge);
+        var rowHeight = Scale(NativeMetrics.ControlHeight);
+        foreach (var column in columns)
+        {
+            var visible = _startPageVisible && column.Count > 0;
+            ShowControls(visible, column.Header);
+            if (visible)
+            {
+                NativeMethods.MoveWindow(column.Header, columnLeft + Scale(NativeMetrics.SpaceSmall), sectionTop,
+                    columnWidth, lineHeight, true);
+            }
+
+            for (var slot = 0; slot < StartEntrySlots; slot++)
+            {
+                var button = _startEntryButtons[column.First + slot];
+                var rowVisible = visible && slot < column.Count &&
+                    sectionTop + lineHeight + Scale(NativeMetrics.SpaceXSmall) + (slot + 1) * rowHeight <= bounds.Y + bounds.Height;
+                ShowControls(rowVisible, button);
+                if (!rowVisible) continue;
+                NativeMethods.MoveWindow(button, columnLeft,
+                    sectionTop + lineHeight + Scale(NativeMetrics.SpaceXSmall) + slot * rowHeight, columnWidth, rowHeight, true);
+            }
+
+            if (column.Count > 0) columnLeft += columnWidth + gap;
+        }
     }
+
+    // The widest a new-tab shortcut column gets, so its rows stay a readable line length.
+    private const int StartColumnMaximumWidth = 340;
 
     private int TextButtonWidth(IntPtr button) =>
         Math.Max(Scale(72), NativeFonts.Measure(_hwnd, _fonts.Body, NativeMethods.GetWindowText(button)).x + Scale(24));

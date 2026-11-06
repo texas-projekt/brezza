@@ -103,6 +103,10 @@ public sealed class WebView2TabHost : ITabHost
 
     public event EventHandler? FaviconChanged;
 
+    public event EventHandler? AudioStateChanged;
+
+    public event EventHandler? LoadingChanged;
+
     public event EventHandler? ProcessFailed;
 
     public event EventHandler<TabNavigationFailedEventArgs>? NavigationFailed;
@@ -289,6 +293,19 @@ public sealed class WebView2TabHost : ITabHost
             _ = ReloadAfterFailureAsync(uri);
         }
     }
+
+    public void Stop()
+    {
+        ThrowIfDisposed();
+        if (_controller is not { } controller || !_isLoading) return;
+        // The runtime ends a stopped load with OperationCanceled or, once part of the response has
+        // arrived, ConnectionAborted. The flag makes either one a stop rather than a failure.
+        _stopRequested = true;
+        controller.CoreWebView2.Stop();
+    }
+
+    // Set when the user stops the load in flight; the next navigation clears it.
+    private bool _stopRequested;
 
     private async Task ReloadAfterFailureAsync(Uri uri)
     {
@@ -603,6 +620,7 @@ public sealed class WebView2TabHost : ITabHost
         core.SourceChanged += OnSourceChanged;
         core.DocumentTitleChanged += OnDocumentTitleChanged;
         core.FaviconChanged += OnFaviconChanged;
+        core.IsDocumentPlayingAudioChanged += OnAudioStateChanged;
         core.ProcessFailed += OnProcessFailed;
         core.NavigationCompleted += OnNavigationCompleted;
         core.NewWindowRequested += OnNewWindowRequested;
@@ -619,6 +637,7 @@ public sealed class WebView2TabHost : ITabHost
         core.SourceChanged -= OnSourceChanged;
         core.DocumentTitleChanged -= OnDocumentTitleChanged;
         core.FaviconChanged -= OnFaviconChanged;
+        core.IsDocumentPlayingAudioChanged -= OnAudioStateChanged;
         core.ProcessFailed -= OnProcessFailed;
         core.NavigationCompleted -= OnNavigationCompleted;
         core.NewWindowRequested -= OnNewWindowRequested;
@@ -651,6 +670,9 @@ public sealed class WebView2TabHost : ITabHost
     private void OnFaviconChanged(object? sender, object args) =>
         FaviconChanged?.Invoke(this, EventArgs.Empty);
 
+    private void OnAudioStateChanged(object? sender, object args) =>
+        AudioStateChanged?.Invoke(this, EventArgs.Empty);
+
     // Whether the navigation that is currently loading started a download. A navigation that ends
     // in a download is aborted by the runtime once the download takes over, which is a download
     // rather than a failed page.
@@ -658,11 +680,14 @@ public sealed class WebView2TabHost : ITabHost
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs args)
     {
+        var wasLoading = _isLoading;
         _isLoading = true;
         _latestNavigationId = args.NavigationId;
         _navigationStartedDownload = false;
         _blockedExternalSchemeNavigationId = 0;
         _externalSchemeBlocked = false;
+        _stopRequested = false;
+        if (!wasLoading) LoadingChanged?.Invoke(this, EventArgs.Empty);
     }
 
 
@@ -676,6 +701,7 @@ public sealed class WebView2TabHost : ITabHost
     private void OnProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs args)
     {
         if (_disposed) return;
+        var wasLoading = _isLoading;
         _isLoading = false;
         _pendingNavigation?.TrySetException(new InvalidOperationException("The WebView2 process failed during navigation."));
         _pendingNavigation = null;
@@ -708,6 +734,7 @@ public sealed class WebView2TabHost : ITabHost
         }
 
         _downloads.Clear();
+        if (wasLoading) LoadingChanged?.Invoke(this, EventArgs.Empty);
         ProcessFailed?.Invoke(this, EventArgs.Empty);
     }
 
@@ -742,6 +769,15 @@ public sealed class WebView2TabHost : ITabHost
 
     private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs args)
     {
+        // The user stopped this load: whatever status the runtime gives, it is reported as a
+        // cancellation, which Core never treats as a failed page.
+        if (!args.IsSuccess && _stopRequested && args.NavigationId == _latestNavigationId)
+        {
+            _stopRequested = false;
+            CompleteNavigation(false, nameof(CoreWebView2WebErrorStatus.OperationCanceled), args.NavigationId);
+            return;
+        }
+
         // A load that a newer navigation replaced also completes unsuccessfully, with
         // OperationCanceled or ConnectionAborted, and the runtime may report it only after the newer
         // navigation already started. The status alone cannot tell that apart from a network
@@ -790,7 +826,9 @@ public sealed class WebView2TabHost : ITabHost
         var replacedByDownload = !isSuccess && _navigationStartedDownload;
 
         // Only the latest navigation decides whether the page is still loading.
+        var stoppedLoading = !superseded && _isLoading;
         if (!superseded) _isLoading = false;
+        if (stoppedLoading) LoadingChanged?.Invoke(this, EventArgs.Empty);
         NavigationCompleted?.Invoke(this, new TabNavigationResultEventArgs(isSuccess, status, superseded || blockedExternalScheme, replacedByDownload, navigationId));
         if (!isSuccess && !superseded && !replacedByDownload && !blockedExternalScheme)
         {

@@ -98,6 +98,7 @@ internal static class NativeMethods
     internal const int IDOK = 1;
     internal const uint WM_CAPTURECHANGED = 0x0215;
     internal const uint WM_RBUTTONDOWN = 0x0204;
+    internal const uint WM_RBUTTONUP = 0x0205;
     internal const uint WM_MOUSEACTIVATE = 0x0021;
     internal const int MA_NOACTIVATE = 3;
     internal const int VK_UP = 0x26;

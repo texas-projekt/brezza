@@ -25,6 +25,9 @@ internal enum FlatButtonStyle
 
     /// <summary>Square caption close button with a red hover.</summary>
     CaptionClose,
+
+    /// <summary>A left-aligned text row with a hover fill, such as a new-tab page shortcut.</summary>
+    Link,
 }
 
 /// <summary>The palette role behind a button, painted where the button is not filled.</summary>
@@ -162,8 +165,18 @@ internal sealed class FlatButtonSet : IDisposable
             ? (entry.Style == FlatButtonStyle.Primary ? _fonts.Strong : _fonts.Body)
             : (square || entry.Style == FlatButtonStyle.SmallIcon ? _fonts.SmallIcon : _fonts.Icon);
         var text = glyph ?? NativeMethods.GetWindowText(item.hwndItem);
-        NativePaint.Text(item.hDC, text, rect, font, foreground,
-            NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE | NativeMethods.DT_END_ELLIPSIS);
+        var textRect = rect;
+        var alignment = NativeMethods.DT_CENTER;
+        if (entry.Style == FlatButtonStyle.Link)
+        {
+            var inset = NativeMethods.Scale(NativeMetrics.SpaceSmall, _dpi());
+            textRect.left += inset;
+            textRect.right -= inset;
+            alignment = NativeMethods.DT_LEFT;
+        }
+
+        NativePaint.Text(item.hDC, text, textRect, font, foreground,
+            alignment | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE | NativeMethods.DT_END_ELLIPSIS | NativeMethods.DT_NOPREFIX);
 
         if (focused) NativePaint.FrameRounded(item.hDC, rect, square ? 0 : radius, palette.Accent, _theme);
         return true;

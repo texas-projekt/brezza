@@ -188,6 +188,8 @@ public sealed class TabRuntimeManager
 
     public void Reload() => ActiveHost?.Reload();
 
+    public void Stop() => ActiveHost?.Stop();
+
     /// <summary>
     /// A tab's favicon image, or null when the tab has no live host (a new, internal, or sleeping
     /// tab) or its document has no favicon. The image is fetched by the tab's own host, so the
@@ -244,7 +246,7 @@ public sealed class TabRuntimeManager
         var decision = TabSleepPolicy.Evaluate(TabHostSignals.FromHost(host), isActiveTab: false);
         if (decision != TabSleepOutcome.Released) return decision;
 
-        _registry.Update(tabId, state: TabRuntimeState.Sleeping);
+        _registry.Update(tabId, state: TabRuntimeState.Sleeping, playingAudio: false);
         _hosts.TryRemove(tabId, out _);
         _lastActivatedUtc.TryRemove(tabId, out _);
         _latestNavigationId.TryRemove(tabId, out _);
@@ -448,6 +450,14 @@ public sealed class TabRuntimeManager
         result.IsReplacedByDownload ||
         string.Equals(result.WebErrorStatus, "OperationCanceled", StringComparison.Ordinal);
 
+    private static bool IsStopped(TabNavigationResultEventArgs result) =>
+        !result.IsSuperseded && !result.IsReplacedByDownload &&
+        string.Equals(result.WebErrorStatus, "OperationCanceled", StringComparison.Ordinal);
+
+    /// <summary>A real page address, not the blank document a fresh host starts on.</summary>
+    private static bool IsShownAddress(string source) =>
+        !string.IsNullOrWhiteSpace(source) && !string.Equals(source, "about:blank", StringComparison.OrdinalIgnoreCase);
+
     private static bool SourcesMatch(string source, Uri uri) =>
         string.Equals(source, uri.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
 
@@ -474,11 +484,12 @@ public sealed class TabRuntimeManager
             host.SourceChanged += (_, _) => _registry.Update(tab.Id, url: host.Source);
             host.TitleChanged += (_, _) => _registry.Update(tab.Id, title: host.Title);
             host.FaviconChanged += (_, _) => _registry.Update(tab.Id, favicon: host.FaviconUri);
+            host.AudioStateChanged += (_, _) => _registry.Update(tab.Id, playingAudio: host.IsDocumentPlayingAudio);
             host.ProcessFailed += (_, _) =>
             {
                 // The host invalidates its controller and can recreate it on the next navigation;
                 // the tab is failed until a later success proves it recovered.
-                if (!_disposed && _registry.Contains(tab.Id)) _registry.Update(tab.Id, state: TabRuntimeState.Failed);
+                if (!_disposed && _registry.Contains(tab.Id)) _registry.Update(tab.Id, state: TabRuntimeState.Failed, playingAudio: false);
             };
             // A load that was replaced or cancelled also ends unsuccessfully. Remember whether the
             // last completion was one, so it does not mark the tab as failed.
@@ -511,7 +522,18 @@ public sealed class TabRuntimeManager
             {
                 RecordNavigation(tab.Id, result.NavigationId);
                 lastCompletionNotAFailure = !result.IsSuccess && IsNotAFailure(result);
-                if (lastCompletionNotAFailure) return;
+                if (lastCompletionNotAFailure)
+                {
+                    // A stopped load leaves the page that was already showing, so the tab's address
+                    // follows the host again. Otherwise reactivating the tab would start the load
+                    // the user just stopped.
+                    if (IsStopped(result) && IsShownAddress(host.Source))
+                    {
+                        _registry.Update(tab.Id, url: host.Source);
+                    }
+
+                    return;
+                }
 
                 if (result.IsSuccess)
                 {

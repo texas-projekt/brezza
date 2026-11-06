@@ -698,6 +698,113 @@ public sealed class TabRuntimeManagerTests
     }
 
     [Fact]
+    public async Task Stop_reaches_only_the_active_host()
+    {
+        var registry = new TabRegistry();
+        var first = registry.Create("https://example.com/one");
+        var second = registry.Create("https://example.com/two");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var firstHost = await ActivateWithHostAsync(manager, factory, first.Id);
+        var secondHost = await ActivateWithHostAsync(manager, factory, second.Id);
+
+        manager.Stop();
+
+        Assert.Equal(0, firstHost.StopCount);
+        Assert.Equal(1, secondHost.StopCount);
+    }
+
+    [Fact]
+    public async Task A_stopped_load_returns_the_tab_address_to_the_page_still_shown()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/shown");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var host = await ActivateWithHostAsync(manager, factory, tab.Id);
+
+        // The shell records the typed address before the host commits it; the load is then stopped.
+        registry.SetUrl(tab.Id, "https://example.com/slow");
+        host.RaiseNavigationCompleted(false, "OperationCanceled");
+
+        Assert.Equal("https://example.com/shown", tab.Url);
+        Assert.NotEqual(TabRuntimeState.Failed, tab.State);
+    }
+
+    [Fact]
+    public async Task A_superseded_or_blank_cancellation_keeps_the_tab_address()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/shown");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var host = await ActivateWithHostAsync(manager, factory, tab.Id);
+
+        // A newer navigation replaced this one: the address belongs to the newer one.
+        registry.SetUrl(tab.Id, "https://example.com/newer");
+        host.RaiseNavigationCompleted(false, "OperationCanceled", superseded: true);
+        Assert.Equal("https://example.com/newer", tab.Url);
+
+        // A fresh host shows only a blank document; the typed address is kept for the user.
+        await host.NavigateAsync(new Uri("about:blank"));
+        Assert.Equal("about:blank", tab.Url);
+        registry.SetUrl(tab.Id, "https://example.com/typed");
+        host.RaiseNavigationCompleted(false, "OperationCanceled");
+        Assert.Equal("https://example.com/typed", tab.Url);
+    }
+
+    [Fact]
+    public void Stop_without_an_active_host_does_nothing()
+    {
+        var manager = new TabRuntimeManager(new TabRegistry(), new DelayedFactory());
+
+        manager.Stop();
+
+        Assert.Null(manager.ActiveHost);
+    }
+
+    [Fact]
+    public async Task Audio_state_follows_the_host_and_clears_when_the_host_sleeps()
+    {
+        var registry = new TabRegistry();
+        var playing = registry.Create("https://example.com/audio");
+        var other = registry.Create("https://example.com/other");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var host = await ActivateWithHostAsync(manager, factory, playing.Id);
+
+        host.RaiseAudio(true);
+        Assert.True(playing.IsPlayingAudio);
+
+        host.RaiseAudio(false);
+        Assert.False(playing.IsPlayingAudio);
+
+        // A tab whose host is released plays nothing, even when the last report was lost.
+        await ActivateWithHostAsync(manager, factory, other.Id);
+        host.RaiseAudio(true);
+        host.IsDocumentPlayingAudio = false;
+        Assert.True(playing.IsPlayingAudio);
+        Assert.Equal(TabSleepOutcome.Released, manager.SleepAsync(playing.Id));
+        Assert.False(playing.IsPlayingAudio);
+    }
+
+    [Fact]
+    public async Task A_process_failure_clears_the_audio_state()
+    {
+        var registry = new TabRegistry();
+        var tab = registry.Create("https://example.com/audio");
+        var factory = new DelayedFactory();
+        var manager = new TabRuntimeManager(registry, factory);
+        var host = await ActivateWithHostAsync(manager, factory, tab.Id);
+        host.RaiseAudio(true);
+
+        host.RaiseProcessFailure();
+
+        Assert.False(tab.IsPlayingAudio);
+        Assert.Equal(TabRuntimeState.Failed, tab.State);
+    }
+
+    [Fact]
     public async Task Closing_a_tab_whose_host_creation_failed_still_completes()
     {
         var registry = new TabRegistry();
@@ -894,6 +1001,22 @@ public sealed class TabRuntimeManagerTests
         public void GoForward() { }
 
         public void Reload() { }
+
+        public int StopCount { get; private set; }
+
+        public void Stop() => StopCount++;
+
+        public event EventHandler? AudioStateChanged;
+
+#pragma warning disable CS0067
+        public event EventHandler? LoadingChanged;
+#pragma warning restore CS0067
+
+        public void RaiseAudio(bool playing)
+        {
+            IsDocumentPlayingAudio = playing;
+            AudioStateChanged?.Invoke(this, EventArgs.Empty);
+        }
 
         public void RaiseTitle(string title)
         {

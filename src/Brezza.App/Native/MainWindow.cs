@@ -49,6 +49,12 @@ internal sealed partial class MainWindow : IDisposable
     public const int IdTitleMinimize = 1031;
     public const int IdTitleMaximize = 1032;
     public const int IdTitleClose = 1033;
+    public const int IdStartRecentHeader = 1040;
+    public const int IdStartBookmarksHeader = 1041;
+
+    // The new-tab page's shortcut rows: the recent column first, then the bookmarks column.
+    public const int IdStartEntryFirst = 1100;
+    public const int StartEntrySlots = 6;
     private const int SleepTimerId = 1;
     private const int ShutdownGuardTimerId = 3;
 
@@ -80,6 +86,9 @@ internal sealed partial class MainWindow : IDisposable
     private const string GlyphBack = "\uE72B";
     private const string GlyphForward = "\uE72A";
     private const string GlyphReload = "\uE72C";
+    private const string GlyphStop = "\uE71A";
+    // A speaker: the tab's page is playing sound.
+    private const string GlyphAudio = "\uE767";
     private const string GlyphStar = "\uE734";
     private const string GlyphStarFilled = "\uE735";
     private const string GlyphMore = "\uE712";
@@ -133,9 +142,20 @@ internal sealed partial class MainWindow : IDisposable
     private IntPtr _titleMinimize;
     private IntPtr _titleMaximize;
     private IntPtr _titleClose;
+    private IntPtr _startRecentHeader;
+    private IntPtr _startBookmarksHeader;
+    private readonly IntPtr[] _startEntryButtons = new IntPtr[StartEntrySlots * 2];
+    private readonly string[] _startEntryUrls = new string[StartEntrySlots * 2];
+    private StartPageEntries _startEntries = StartPageEntries.Empty;
 
-    private readonly List<(string Id, string Text, bool Private)> _tabMirror = new();
+    private readonly List<(string Id, string Text, bool Private, bool Audio)> _tabMirror = new();
     private int _hotTab = -1;
+
+    // Whether the pointer is over the hot tab's close glyph, which an inactive tab shows on hover.
+    private bool _hotTabClose;
+
+    // Whether the active page is loading; the reload button is a stop button while it is.
+    private bool _loading;
     private int _laidOutTabCount = -1;
 
     // Past the point where every tab still fits at a readable width, the strip is wider than the
@@ -187,6 +207,11 @@ internal sealed partial class MainWindow : IDisposable
     public event EventHandler? BackRequested;
     public event EventHandler? ForwardRequested;
     public event EventHandler? ReloadRequested;
+    public event EventHandler? StopRequested;
+    public event EventHandler<TabCommand>? TabCommandRequested;
+
+    /// <summary>A shortcut on the new-tab page was chosen; the argument is its URL.</summary>
+    public event EventHandler<string>? StartEntryRequested;
     public event EventHandler? ToggleBookmarkRequested;
     public event EventHandler<string>? OpenPanelRequested;
     public event EventHandler? NoticeDismissRequested;
@@ -345,7 +370,7 @@ internal sealed partial class MainWindow : IDisposable
         Label(_closeActiveTabButton, "tab.close", "tab.closeShortcut");
         Label(_backButton, "toolbar.back", "toolbar.backShortcut");
         Label(_forwardButton, "toolbar.forward", "toolbar.forwardShortcut");
-        Label(_reloadButton, "toolbar.reload", "toolbar.reloadShortcut");
+        ApplyReloadButton();
         Label(_menuButton, "toolbar.menu", "toolbar.menuShortcut");
         Label(_titleMinimize, "window.minimize", "window.minimize");
         Label(_titleClose, "window.close", "window.close");
@@ -355,6 +380,8 @@ internal sealed partial class MainWindow : IDisposable
         NativeMethods.SetWindowText(_noticeDismissButton, _localization.Get("notice.dismiss"));
         NativeMethods.SetWindowText(_startTitleText, _startTitle);
         NativeMethods.SetWindowText(_startSubtitleText, _startSubtitle);
+        NativeMethods.SetWindowText(_startRecentHeader, _localization.Get("start.recent"));
+        NativeMethods.SetWindowText(_startBookmarksHeader, _localization.Get("start.bookmarks"));
 
         // The address field has no placeholder property, so the cue banner carries the label.
         NativeMethods.SendMessage(
@@ -414,7 +441,7 @@ internal sealed partial class MainWindow : IDisposable
 
         var desired = tabs
             .Select(tab => (tab.Id, Text: TabText(tab, tab.Id == activeTabId && activeLoading),
-                Private: tab.SessionKind == BrowserSessionKind.Private))
+                Private: tab.SessionKind == BrowserSessionKind.Private, Audio: tab.IsPlayingAudio))
             .ToList();
         // Make room for the new count first, so inserting a tab never overflows the strip.
         var countChanged = desired.Count != _laidOutTabCount;
@@ -478,15 +505,42 @@ internal sealed partial class MainWindow : IDisposable
         // the close button follows the selection, which keeps title updates cheap.
         if (countChanged) Layout();
         else PositionTabClose();
+        // The strip repaints on every update: the audio marker and the hover close glyph are painted,
+        // not item text, so an unchanged item list can still look different.
         NativeMethods.InvalidateRect(_tabStrip, IntPtr.Zero, false);
     }
 
-    public void UpdateNavigationState(bool canGoBack, bool canGoForward)
+    /// <summary>
+    /// Updates the navigation buttons. While the page loads, the reload button stops the load
+    /// instead, as in other browsers, so one place in the toolbar answers "is this page done".
+    /// </summary>
+    public void UpdateNavigationState(bool canGoBack, bool canGoForward, bool loading = false)
     {
         if (_hwnd == IntPtr.Zero) return;
         NativeMethods.EnableWindow(_backButton, canGoBack);
         NativeMethods.EnableWindow(_forwardButton, canGoForward);
-        NativeMethods.EnableWindow(_reloadButton, _currentUrl.Length > 0);
+        NativeMethods.EnableWindow(_reloadButton, loading || _currentUrl.Length > 0);
+        if (_loading == loading) return;
+        _loading = loading;
+        ApplyReloadButton();
+    }
+
+    private void ApplyReloadButton()
+    {
+        if (_reloadButton == IntPtr.Zero) return;
+        if (_loading) Label(_reloadButton, "toolbar.stop", "toolbar.stopShortcut");
+        else Label(_reloadButton, "toolbar.reload", "toolbar.reloadShortcut");
+        _buttons.SetGlyph(_reloadButton, _loading ? GlyphStop : GlyphReload);
+    }
+
+    /// <summary>Whether keyboard focus is in the address field.</summary>
+    public bool AddressHasFocus
+    {
+        get
+        {
+            var focus = NativeMethods.GetFocus();
+            return focus != IntPtr.Zero && (focus == _addressCombo || NativeMethods.IsChild(_addressCombo, focus));
+        }
     }
 
     /// <summary>
@@ -580,24 +634,35 @@ internal sealed partial class MainWindow : IDisposable
         NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
     }
 
-    /// <summary>Shows the browser-owned new-tab page while the active tab has no content host.</summary>
-    public void SetNewTabPage(bool visible, bool isPrivate)
+    /// <summary>
+    /// Shows the browser-owned new-tab page while the active tab has no content host, with recent
+    /// pages and bookmarks as shortcuts. <paramref name="entries"/> null keeps the current ones.
+    /// </summary>
+    public void SetNewTabPage(bool visible, bool isPrivate, StartPageEntries? entries = null)
     {
         var title = _localization.Get(isPrivate ? "start.privateTitle" : "app.name");
         var subtitle = _localization.Get(isPrivate ? "start.privateBody" : "start.subtitle");
+        var nextEntries = entries ?? _startEntries;
 
         // The shell renders state on every source, title, and loading change, so this is called many
         // times per page load. Re-laying out and erasing the whole window for an unchanged page
         // flashes the start-page text and the content edge on every reload.
         if (visible == _startPageVisible &&
             string.Equals(title, _startTitle, StringComparison.Ordinal) &&
-            string.Equals(subtitle, _startSubtitle, StringComparison.Ordinal)) return;
+            string.Equals(subtitle, _startSubtitle, StringComparison.Ordinal) &&
+            nextEntries.SameAs(_startEntries)) return;
 
         _startPageVisible = visible;
         _startTitle = title;
         _startSubtitle = subtitle;
+        _startEntries = nextEntries;
         RenderStartPage();
     }
+
+    /// <summary>The new-tab page's shortcut URLs in order (recent, then bookmarks); for the smoke harness.</summary>
+    public IReadOnlyList<string> StartEntryUrls =>
+        _startEntryUrls.Where((url, index) => !string.IsNullOrEmpty(url) &&
+            NativeMethods.IsWindowVisible(_startEntryButtons[index])).ToList();
 
     /// <summary>Reports a startup failure in place of the new-tab page.</summary>
     public void SetStartupError(string message)
@@ -880,7 +945,8 @@ internal sealed partial class MainWindow : IDisposable
         var palette = _theme.Palette;
         var (foreground, background) =
             control == _noticeText ? (palette.NoticeText, palette.Notice) :
-            control == _startSubtitleText ? (palette.SecondaryText, palette.Surface) :
+            control == _startSubtitleText || control == _startRecentHeader || control == _startBookmarksHeader
+                ? (palette.SecondaryText, palette.Surface) :
             (palette.Text, palette.Surface);
         NativeMethods.SetTextColor(dc, foreground);
         NativeMethods.SetBkColor(dc, background);
@@ -945,6 +1011,16 @@ internal sealed partial class MainWindow : IDisposable
             NativeMethods.WS_CHILD | NativeMethods.SS_CENTER | NativeMethods.SS_NOPREFIX);
         _startSubtitleText = CreateChild(hWnd, "STATIC", IdStartSubtitle,
             NativeMethods.WS_CHILD | NativeMethods.SS_CENTER | NativeMethods.SS_NOPREFIX);
+        _startRecentHeader = CreateChild(hWnd, "STATIC", IdStartRecentHeader,
+            NativeMethods.WS_CHILD | NativeMethods.SS_LEFTNOWORDWRAP | NativeMethods.SS_NOPREFIX);
+        _startBookmarksHeader = CreateChild(hWnd, "STATIC", IdStartBookmarksHeader,
+            NativeMethods.WS_CHILD | NativeMethods.SS_LEFTNOWORDWRAP | NativeMethods.SS_NOPREFIX);
+        for (var slot = 0; slot < _startEntryButtons.Length; slot++)
+        {
+            _startEntryButtons[slot] = CreateButton(hWnd, IdStartEntryFirst + slot, FlatButtonStyle.Link,
+                FlatBackdrop.Surface, visible: false);
+            _startEntryUrls[slot] = string.Empty;
+        }
 
         NativeMethods.SendMessage(_addressCombo, NativeMethods.CB_LIMITTEXT, IntPtr.Zero, new IntPtr(8192));
 
@@ -1013,6 +1089,10 @@ internal sealed partial class MainWindow : IDisposable
         }
 
         if (_startTitleText != IntPtr.Zero) NativeMethods.SetWindowFont(_startTitleText, _fonts.Display, false);
+        foreach (var control in _startEntryButtons.Concat(new[] { _startRecentHeader, _startBookmarksHeader }))
+        {
+            if (control != IntPtr.Zero) NativeMethods.SetWindowFont(control, _fonts.Body, false);
+        }
 
         _buttons.Refresh();
         _fields.Refresh(Scale(NativeMetrics.ControlHeight));
@@ -1046,8 +1126,23 @@ internal sealed partial class MainWindow : IDisposable
         if (_hwnd == IntPtr.Zero) return;
         NativeMethods.SetWindowText(_startTitleText, _startTitle);
         NativeMethods.SetWindowText(_startSubtitleText, _startSubtitle);
+        FillStartEntries(0, _startEntries.Recent);
+        FillStartEntries(StartEntrySlots, _startEntries.Bookmarks);
         Layout();
         NativeMethods.InvalidateRect(_hwnd, IntPtr.Zero, true);
+    }
+
+    private void FillStartEntries(int firstSlot, IReadOnlyList<StartPageEntry> entries)
+    {
+        for (var slot = 0; slot < StartEntrySlots; slot++)
+        {
+            var entry = slot < entries.Count ? entries[slot] : null;
+            var button = _startEntryButtons[firstSlot + slot];
+            _startEntryUrls[firstSlot + slot] = entry?.Url ?? string.Empty;
+            NativeMethods.SetWindowText(button, entry?.Title ?? string.Empty);
+            // The tooltip names the address, which the row's title alone may not show.
+            if (entry is not null) _buttons.SetTooltip(button, entry.Url);
+        }
     }
 
     // ---------- Commands ----------
@@ -1114,7 +1209,12 @@ internal sealed partial class MainWindow : IDisposable
                 ForwardRequested?.Invoke(this, EventArgs.Empty);
                 break;
             case IdReload:
-                ReloadRequested?.Invoke(this, EventArgs.Empty);
+                if (_loading) StopRequested?.Invoke(this, EventArgs.Empty);
+                else ReloadRequested?.Invoke(this, EventArgs.Empty);
+                break;
+            case >= IdStartEntryFirst and < IdStartEntryFirst + StartEntrySlots * 2:
+                var url = _startEntryUrls[commandId - IdStartEntryFirst];
+                if (!string.IsNullOrEmpty(url)) StartEntryRequested?.Invoke(this, url);
                 break;
             case IdNewTab:
                 NewTabRequested?.Invoke(this, EventArgs.Empty);
@@ -1190,6 +1290,47 @@ internal sealed partial class MainWindow : IDisposable
             chosen: index => InvokeCommand(commands[index]),
             alignRight: true,
             minimumWidth: Scale(240));
+    }
+
+    /// <summary>The commands a tab's context menu offers, in the order it lists them.</summary>
+    private static readonly TabCommandKind[] TabMenuCommands =
+    {
+        TabCommandKind.Reload, TabCommandKind.Duplicate,
+        TabCommandKind.Close, TabCommandKind.CloseOthers, TabCommandKind.CloseToTheRight,
+    };
+
+    /// <summary>
+    /// Opens a tab's context menu at a screen point. Commands that would do nothing (closing the
+    /// others when it is the only tab) are left out rather than shown disabled.
+    /// </summary>
+    public void ShowTabMenu(int index, NativeMethods.POINT screenPoint)
+    {
+        if (index < 0 || index >= _tabMirror.Count) return;
+        var tabId = _tabMirror[index].Id;
+        var commands = TabMenuCommands
+            .Where(kind => kind switch
+            {
+                TabCommandKind.CloseOthers => _tabMirror.Count > 1,
+                TabCommandKind.CloseToTheRight => index < _tabMirror.Count - 1,
+                _ => true,
+            })
+            .ToList();
+        var items = commands.Select(kind => kind switch
+        {
+            TabCommandKind.Reload => new FlatPopupItem(_localization.Get("tab.menu.reload")),
+            TabCommandKind.Duplicate => new FlatPopupItem(_localization.Get("tab.menu.duplicate")),
+            TabCommandKind.Close => new FlatPopupItem(_localization.Get("tab.menu.close"), "Ctrl+W", separatorBefore: true),
+            TabCommandKind.CloseOthers => new FlatPopupItem(_localization.Get("tab.menu.closeOthers")),
+            _ => new FlatPopupItem(_localization.Get("tab.menu.closeRight")),
+        }).ToList();
+
+        var anchor = new NativeMethods.RECT
+        {
+            left = screenPoint.x, top = screenPoint.y, right = screenPoint.x, bottom = screenPoint.y,
+        };
+        _menu.Show(_hwnd, _tabStrip, anchor, items,
+            chosen: chosen => TabCommandRequested?.Invoke(this, new TabCommand(tabId, commands[chosen])),
+            minimumWidth: Scale(200));
     }
 
     /// <summary>True when a WM_SETTINGCHANGE broadcast reports a system palette change.</summary>

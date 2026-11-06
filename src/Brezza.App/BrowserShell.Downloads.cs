@@ -68,14 +68,7 @@ internal sealed partial class BrowserShell
     private void SaveDownloads()
     {
         if (_downloadStore is null || _downloads is null) return;
-        try
-        {
-            _downloadStore.Save(_downloads.Downloads);
-        }
-        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
-        {
-            TraceWarning("The download list could not be saved", exception);
-        }
+        TrySave(() => _downloadStore.Save(_downloads.Downloads), "download");
     }
 
     /// <summary>Refreshes the downloads panel only while it is the panel the user has open.</summary>
@@ -268,6 +261,24 @@ internal sealed partial class BrowserShell
         if (cookie.IsHttpOnly) parts.Add(_localization.Get("cookies.httpOnly"));
         parts.Add(_localization.Format("cookies.sameSite", "value", cookie.SameSite.ToString()));
         return string.Join(" • ", parts);
+    }
+
+    private const int StartEntryLimit = 6;
+
+    /// <summary>
+    /// The new-tab page's shortcuts: recent pages and bookmarks. A private tab shows none, so its
+    /// start page never reveals what the normal session visited.
+    /// </summary>
+    private StartPageEntries StartEntries(bool isPrivate)
+    {
+        if (isPrivate) return StartPageEntries.Empty;
+        var recent = _historyStore?.GetAll(StartEntryLimit)
+            .Select(item => new StartPageEntry(item.Title, item.Url))
+            .ToList() ?? new List<StartPageEntry>();
+        var bookmarks = _bookmarkStore?.GetAll(StartEntryLimit)
+            .Select(item => new StartPageEntry(item.Title, item.Url))
+            .ToList() ?? new List<StartPageEntry>();
+        return new StartPageEntries(recent, bookmarks);
     }
 
     private IReadOnlyList<string> GetAddressSuggestions()

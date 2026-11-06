@@ -253,9 +253,30 @@ internal sealed partial class MainWindow
                     NativePaint.Fill(dc, NativePaint.Rect(rect.right - 1, (client.Height - divider) / 2, 1, divider), palette.Border, _theme);
                 }
 
+                // An inactive tab shows its own close glyph while hovered; the active tab has the
+                // close button. Either way the label leaves room for it.
+                var showsClose = active || hot;
                 var textRect = rect;
                 textRect.left += padding;
-                textRect.right -= active ? Scale(32) : padding;
+                textRect.right -= showsClose ? Scale(32) : padding;
+
+                if (hot)
+                {
+                    var glyphRect = TabCloseGlyphRect(item, client.Height);
+                    if (_hotTabClose) NativePaint.FillRounded(dc, glyphRect, Scale(NativeMetrics.RadiusControl), palette.Pressed, _theme);
+                    NativePaint.Text(dc, GlyphClose, glyphRect, _fonts.SmallIcon, palette.Text,
+                        NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+                }
+
+                // A tab playing sound says so at the end of its label, where a user looks for it.
+                if (_tabMirror[index].Audio)
+                {
+                    var audioWidth = Scale(TabIconSize) + Scale(NativeMetrics.SpaceXSmall);
+                    var audioRect = NativePaint.Rect(textRect.right - Scale(TabIconSize), 0, Scale(TabIconSize), client.Height);
+                    NativePaint.Text(dc, GlyphAudio, audioRect, _fonts.SmallIcon, active ? palette.Text : palette.SecondaryText,
+                        NativeMethods.DT_CENTER | NativeMethods.DT_VCENTER | NativeMethods.DT_SINGLELINE);
+                    textRect.right -= audioWidth;
+                }
 
                 var privateTab = _tabMirror[index].Private;
                 var label = _tabMirror[index].Text;

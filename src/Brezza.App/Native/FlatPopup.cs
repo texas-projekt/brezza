@@ -376,8 +376,10 @@ internal sealed class FlatPopup : IDisposable
 
     // ---------- Rows ----------
 
-    private void Choose(int index)
+    /// <summary>Chooses a row, as a click or Enter on it does.</summary>
+    public void Choose(int index)
     {
+        if (!IsOpen || index < 0 || index >= _items.Count) return;
         var chosen = _chosen;
         Close();
         chosen?.Invoke(index);

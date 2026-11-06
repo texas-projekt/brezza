@@ -47,20 +47,21 @@ internal sealed partial class BrowserShell
 
     private async Task RunMainPathAsync(Uri pageUri)
     {
-        // Start: one empty tab, no content host, and the new-tab page.
+        // Start: one empty tab, no content host, the new-tab page listing the seeded history entry.
         Check(_tabs?.Tabs.Count == 1 && _runtime?.ActiveHost is null, "start did not open one empty tab");
         Check(_window.IsNewTabPageVisible, "the new-tab page is not shown");
+        Check(_window.StartEntryUrls.Contains("https://example.test/"), "the new-tab page lists no recent pages");
 
         // Navigate through the address field; the tab, address, and title follow the page.
         await NavigateAsync(pageUri.AbsoluteUri);
         await WaitForPageAsync(pageUri);
         Check(string.Equals(_window.AddressText, pageUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase), "the address field does not show the page");
 
-        // A missing page raises a failure notice that offers Try again.
+        // A missing page raises a failure notice that offers Reload.
         var missing = new Uri(new Uri(pageUri, "."), "missing.html");
         await NavigateAsync(missing.AbsoluteUri);
         await WaitForAsync(() => _window.IsNoticeVisible);
-        Check(_window.IsControlVisible(MainWindow.IdNoticeAction), "the failure notice offers no Try again");
+        Check(_window.IsControlVisible(MainWindow.IdNoticeAction), "the failure notice offers no Reload");
         _window.InvokeCommand(MainWindow.IdNoticeDismiss);
         await NavigateAsync(pageUri.AbsoluteUri);
         await WaitForPageAsync(pageUri);

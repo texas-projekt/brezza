@@ -95,6 +95,9 @@ internal sealed partial class BrowserShell : IDisposable
         _window.BackRequested += (_, _) => _runtime?.GoBack();
         _window.ForwardRequested += (_, _) => _runtime?.GoForward();
         _window.ReloadRequested += (_, _) => _runtime?.Reload();
+        _window.StopRequested += (_, _) => _runtime?.Stop();
+        _window.TabCommandRequested += (_, command) => Observe(async () => await RunTabCommandAsync(command));
+        _window.StartEntryRequested += (_, url) => Observe(async () => await NavigateAsync(url));
         _window.ToggleBookmarkRequested += (_, _) => ToggleBookmark();
         _window.OpenPanelRequested += (_, mode) => OpenPanel(mode);
         _window.NoticeDismissRequested += (_, _) => SendNotice(null);
@@ -259,6 +262,9 @@ internal sealed partial class BrowserShell : IDisposable
         var tab = _tabs.Create(sessionKind: sessionKind);
         await _runtime.ActivateAsync(tab.Id, waitForNavigation: false);
         RenderState();
+        // A new tab is for typing: the one search/address field takes the cursor, so the new-tab
+        // page needs no second search box.
+        _window.FocusAddress();
     }
 
     private async Task ActivateTabAsync(string tabId)
@@ -282,11 +288,61 @@ internal sealed partial class BrowserShell : IDisposable
         RenderState();
     }
 
+    /// <summary>Runs a command from a tab's context menu against the tab it was opened on.</summary>
+    private async Task RunTabCommandAsync(TabCommand command)
+    {
+        if (_tabs is null || _runtime is null || !_tabs.Contains(command.TabId)) return;
+        ClosePanel();
+        var tabs = _tabs.Tabs;
+        var index = tabs.ToList().FindIndex(tab => tab.Id == command.TabId);
+        var target = tabs[index];
+        switch (command.Kind)
+        {
+            case TabCommandKind.Reload:
+                if (_tabs.ActiveTab?.Id != target.Id) await _runtime.ActivateAsync(target.Id);
+                _runtime.Reload();
+                break;
+            case TabCommandKind.Duplicate:
+                var copy = _tabs.Create(target.Url, target.SessionKind);
+                await _runtime.ActivateAsync(copy.Id, waitForNavigation: false);
+                break;
+            case TabCommandKind.Close:
+                await CloseTabAsync(target.Id);
+                return;
+            case TabCommandKind.CloseOthers:
+                await CloseTabsAsync(tabs.Where(tab => tab.Id != target.Id).Select(tab => tab.Id).ToList(), target.Id);
+                return;
+            case TabCommandKind.CloseToTheRight:
+                await CloseTabsAsync(tabs.Skip(index + 1).Select(tab => tab.Id).ToList(), target.Id);
+                return;
+        }
+
+        RenderState();
+    }
+
+    /// <summary>
+    /// Closes several tabs. The tab that stays is activated first, so closing the others never
+    /// activates (and creates a host for) a tab that is about to close too.
+    /// </summary>
+    private async Task CloseTabsAsync(IReadOnlyList<string> tabIds, string keepTabId)
+    {
+        if (_tabs is null || _runtime is null) return;
+        if (_tabs.ActiveTab?.Id != keepTabId) await _runtime.ActivateAsync(keepTabId);
+        foreach (var tabId in tabIds)
+        {
+            if (_tabs.Contains(tabId)) await _runtime.CloseAsync(tabId);
+        }
+
+        RenderState();
+    }
+
     private void ToggleBookmark()
     {
         if (_runtime?.ActiveHost is not { } host || _bookmarkStore is null) return;
         if (_bookmarkStore.Contains(host.Source)) _bookmarkStore.Remove(host.Source);
         else _bookmarkStore.Add(host.Source, host.Title);
+        // A bookmark is saved when it changes, so a crash does not lose it.
+        TrySave(() => _bookmarkStore.Save(), "bookmarks");
         RenderState();
     }
 
@@ -317,8 +373,9 @@ internal sealed partial class BrowserShell : IDisposable
                 e.Handled = true;
                 Observe(async () => await CloseTabAsync(active.Id));
             }
-            else if (e.VirtualKey == 0x4C || e.VirtualKey == 0x45)
+            else if (e.VirtualKey == 0x4C || e.VirtualKey == 0x45 || e.VirtualKey == 0x4B)
             {
+                // Ctrl+L, Ctrl+E, and Ctrl+K all go to the one search/address field.
                 e.Handled = true;
                 _window.FocusAddress();
             }
@@ -374,6 +431,13 @@ internal sealed partial class BrowserShell : IDisposable
             e.Handled = true;
             _runtime.Reload();
         }
+        else if (e.VirtualKey == 0x1B && !e.Alt && !e.Shift && _runtime.ActiveHost is { IsLoading: true } &&
+                 !_window.AddressHasFocus)
+        {
+            // Escape stops a loading page. In the address field it keeps reverting the draft.
+            e.Handled = true;
+            _runtime.Stop();
+        }
     }
 
     // ---------- State rendering ----------
@@ -385,9 +449,10 @@ internal sealed partial class BrowserShell : IDisposable
         var host = _runtime?.ActiveHost;
         var bookmarked = host is not null && _bookmarkStore?.Contains(host.Source) == true;
 
+        var loading = host?.IsLoading == true;
         _favicons?.Sync(_tabs.Tabs);
-        _window.UpdateTabs(_tabs.Tabs, active?.Id, host?.IsLoading == true);
-        _window.UpdateNavigationState(host?.CanGoBack ?? false, host?.CanGoForward ?? false);
+        _window.UpdateTabs(_tabs.Tabs, active?.Id, loading);
+        _window.UpdateNavigationState(host?.CanGoBack ?? false, host?.CanGoForward ?? false, loading);
         _window.SetBookmarked(bookmarked);
         _window.SetAddressText(active?.Url ?? string.Empty);
 
@@ -399,9 +464,9 @@ internal sealed partial class BrowserShell : IDisposable
         // A tab that holds a URL shows the palette until its content host exists. Showing the
         // new-tab page instead flashes the new-tab text on top of a page that is loading,
         // which is most visible when a session is restored at startup.
-        _window.SetNewTabPage(host is null && string.IsNullOrWhiteSpace(active?.Url),
-            active?.SessionKind == BrowserSessionKind.Private);
-
+        var showStartPage = host is null && string.IsNullOrWhiteSpace(active?.Url);
+        var privateStart = active?.SessionKind == BrowserSessionKind.Private;
+        _window.SetNewTabPage(showStartPage, privateStart, showStartPage ? StartEntries(privateStart) : null);
     }
 
     /// <summary>
@@ -416,6 +481,7 @@ internal sealed partial class BrowserShell : IDisposable
         {
             _observedHost.SourceChanged -= OnActiveHostStateChanged;
             _observedHost.TitleChanged -= OnActiveHostStateChanged;
+            _observedHost.LoadingChanged -= OnActiveHostStateChanged;
             _observedHost.ProcessFailed -= OnActiveHostFailed;
             _observedHost.SetVisible(false);
         }
@@ -425,6 +491,7 @@ internal sealed partial class BrowserShell : IDisposable
         {
             _observedHost.SourceChanged += OnActiveHostStateChanged;
             _observedHost.TitleChanged += OnActiveHostStateChanged;
+            _observedHost.LoadingChanged += OnActiveHostStateChanged;
             _observedHost.ProcessFailed += OnActiveHostFailed;
             // The palette reaches the surface before it becomes visible, so an unpainted page never
             // shows the WebView2 default white.
@@ -676,16 +743,32 @@ internal sealed partial class BrowserShell : IDisposable
     /// </summary>
     private void SaveBrowserData()
     {
+        // Each store is saved on its own: one store that cannot be written must not cost the others.
+        // Saving never blocks the close or the session end.
+        TrySave(() => _historyStore?.Save(), "history");
+        TrySave(() => _bookmarkStore?.Save(), "bookmarks");
+        TrySave(() =>
+        {
+            if (_tabs is not null) _sessionStore?.Save(_tabs.Tabs, _tabs.ActiveTab?.Id);
+        }, "session");
+    }
+
+    /// <summary>
+    /// Writes one local store. A failed write is traced and shown, so the user learns their data
+    /// was not kept instead of finding out after a restart.
+    /// </summary>
+    private bool TrySave(Action save, string store)
+    {
         try
         {
-            _historyStore?.Save();
-            _bookmarkStore?.Save();
-            if (_tabs is not null) _sessionStore?.Save(_tabs.Tabs, _tabs.ActiveTab?.Id);
+            save();
+            return true;
         }
         catch (Exception exception)
         {
-            // Saving must never block the close or the session end.
-            TraceError("Browser data could not be saved", exception);
+            TraceError("The " + store + " store could not be saved", exception);
+            if (!_shutdownStarted) SendNotice("notice.saveFailed", exception.Message);
+            return false;
         }
     }
 
@@ -720,6 +803,7 @@ internal sealed partial class BrowserShell : IDisposable
         {
             _observedHost.SourceChanged -= OnActiveHostStateChanged;
             _observedHost.TitleChanged -= OnActiveHostStateChanged;
+            _observedHost.LoadingChanged -= OnActiveHostStateChanged;
             _observedHost.ProcessFailed -= OnActiveHostFailed;
             _observedHost = null;
         }

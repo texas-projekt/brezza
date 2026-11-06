@@ -43,9 +43,11 @@ internal sealed partial class MainWindow
 
             case NativeMethods.WM_MOUSEMOVE:
                 var hot = HitTestTab(lParam);
-                if (hot != _hotTab)
+                var overClose = IsOverTabClose(hot, lParam);
+                if (hot != _hotTab || overClose != _hotTabClose)
                 {
                     _hotTab = hot;
+                    _hotTabClose = overClose;
                     var track = new NativeMethods.TRACKMOUSEEVENT
                     {
                         cbSize = (uint)Marshal.SizeOf<NativeMethods.TRACKMOUSEEVENT>(),
@@ -60,7 +62,35 @@ internal sealed partial class MainWindow
 
             case NativeMethods.WM_MOUSELEAVE:
                 _hotTab = -1;
+                _hotTabClose = false;
                 NativeMethods.InvalidateRect(hWnd, IntPtr.Zero, false);
+                break;
+
+            case NativeMethods.WM_LBUTTONDOWN:
+                // An inactive tab's hover close glyph closes that tab without selecting it first.
+                var pressed = HitTestTab(lParam);
+                if (IsOverTabClose(pressed, lParam))
+                {
+                    CloseTabRequested?.Invoke(this, _tabMirror[pressed].Id);
+                    return IntPtr.Zero;
+                }
+
+                break;
+
+            case NativeMethods.WM_RBUTTONUP:
+                var menuTab = HitTestTab(lParam);
+                if (menuTab >= 0)
+                {
+                    var point = new NativeMethods.POINT
+                    {
+                        x = unchecked((short)NativeMethods.GetLoWord(lParam)),
+                        y = unchecked((short)NativeMethods.GetHiWord(lParam)),
+                    };
+                    NativeMethods.ClientToScreen(hWnd, ref point);
+                    ShowTabMenu(menuTab, point);
+                    return IntPtr.Zero;
+                }
+
                 break;
 
             case NativeMethods.WM_MBUTTONDOWN:
@@ -84,6 +114,33 @@ internal sealed partial class MainWindow
         }
 
         return NativeMethods.DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    /// <summary>
+    /// Where an inactive tab draws the close glyph it shows on hover, in strip coordinates: the same
+    /// place the active tab's close button sits, so the target does not move when a tab activates.
+    /// </summary>
+    private NativeMethods.RECT TabCloseGlyphRect(NativeMethods.RECT tab, int stripHeight)
+    {
+        var margin = Scale(TabCloseMargin);
+        var size = Math.Min(Scale(TabCloseSize), Math.Max(Scale(14), tab.Width - margin * 2));
+        var lowest = tab.left + margin;
+        var highest = tab.right - size - margin;
+        var left = highest <= lowest
+            ? tab.left + (tab.Width - size) / 2
+            : Math.Min(Math.Max(tab.right - size - Scale(TabCloseInset), lowest), highest);
+        return NativePaint.Rect(left, (stripHeight - size) / 2, size, size);
+    }
+
+    /// <summary>Whether a strip point is over the close glyph of an inactive tab.</summary>
+    private bool IsOverTabClose(int index, IntPtr lParam)
+    {
+        if (index < 0 || index == SelectedTabIndex) return false;
+        NativeMethods.GetClientRect(_tabStrip, out var client);
+        var glyph = TabCloseGlyphRect(TabRect(index), client.Height);
+        var x = unchecked((short)NativeMethods.GetLoWord(lParam));
+        var y = unchecked((short)NativeMethods.GetHiWord(lParam));
+        return x >= glyph.left && x < glyph.right && y >= glyph.top && y < glyph.bottom;
     }
 
     private int HitTestTab(IntPtr lParam)

@@ -151,5 +151,16 @@
   "window.restore": "还原",
   "window.close": "关闭",
   "toolbar.menu": "设置及其他",
-  "toolbar.menuShortcut": "设置及其他 (Alt+F)"
+  "toolbar.menuShortcut": "设置及其他 (Alt+F)",
+  "toolbar.stop": "停止",
+  "toolbar.stopShortcut": "停止加载 (Esc)",
+  "tab.menu.reload": "重新加载",
+  "tab.menu.duplicate": "复制标签页",
+  "tab.menu.close": "关闭标签页",
+  "tab.menu.closeOthers": "关闭其他标签页",
+  "tab.menu.closeRight": "关闭右侧标签页",
+  "tab.playingAudio": "正在播放音频",
+  "start.recent": "最近访问",
+  "start.bookmarks": "书签",
+  "notice.saveFailed": "浏览器数据无法保存"
 }

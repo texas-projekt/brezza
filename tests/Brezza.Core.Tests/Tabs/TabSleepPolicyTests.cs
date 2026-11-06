@@ -107,9 +107,15 @@ public sealed class TabSleepPolicyTests
 
         public void Reload() { }
 
+        public void Stop() { }
+
         // The interface requires the full event surface; this fake only reports host signals.
 #pragma warning disable CS0067
         public event EventHandler? SourceChanged;
+
+        public event EventHandler? AudioStateChanged;
+
+        public event EventHandler? LoadingChanged;
 
         public event EventHandler? TitleChanged;
 

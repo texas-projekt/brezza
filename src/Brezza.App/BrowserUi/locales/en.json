@@ -151,5 +151,16 @@
   "window.restore": "Restore",
   "window.close": "Close",
   "toolbar.menu": "Settings and more",
-  "toolbar.menuShortcut": "Settings and more (Alt+F)"
+  "toolbar.menuShortcut": "Settings and more (Alt+F)",
+  "toolbar.stop": "Stop",
+  "toolbar.stopShortcut": "Stop loading (Esc)",
+  "tab.menu.reload": "Reload",
+  "tab.menu.duplicate": "Duplicate",
+  "tab.menu.close": "Close tab",
+  "tab.menu.closeOthers": "Close other tabs",
+  "tab.menu.closeRight": "Close tabs to the right",
+  "tab.playingAudio": "Playing audio",
+  "start.recent": "Recently visited",
+  "start.bookmarks": "Bookmarks",
+  "notice.saveFailed": "Browser data could not be saved"
 }

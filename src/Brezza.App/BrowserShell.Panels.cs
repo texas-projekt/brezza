@@ -177,11 +177,11 @@ internal sealed partial class BrowserShell
         var mode = _panelMode;
         if (mode == "history")
         {
-            if (_historyStore?.Remove(url) == true) _historyStore.Save();
+            if (_historyStore?.Remove(url) == true) TrySave(() => _historyStore.Save(), "history");
         }
         else if (mode == "bookmarks")
         {
-            _bookmarkStore?.Remove(url);
+            if (_bookmarkStore?.Remove(url) == true) TrySave(() => _bookmarkStore.Save(), "bookmarks");
         }
 
         RefreshPanel();
@@ -190,7 +190,7 @@ internal sealed partial class BrowserShell
     private void ClearHistory()
     {
         _historyStore?.Clear();
-        _historyStore?.Save();
+        if (_historyStore is not null) TrySave(() => _historyStore.Save(), "history");
         RefreshPanel();
     }
 

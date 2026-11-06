@@ -35,5 +35,8 @@ public sealed class BrowserTab
     /// </summary>
     public string FaviconUri { get; internal set; } = string.Empty;
 
+    /// <summary>True while the tab's document plays audio. A tab without a live host plays none.</summary>
+    public bool IsPlayingAudio { get; internal set; }
+
     public TabRuntimeState State { get; internal set; }
 }

@@ -76,7 +76,16 @@ public interface ITabHost : IDisposable
 
     void Reload();
 
+    /// <summary>Stops the navigation that is loading. A stopped load is not a page failure.</summary>
+    void Stop();
+
     event EventHandler? SourceChanged;
+
+    /// <summary><see cref="IsDocumentPlayingAudio"/> changed.</summary>
+    event EventHandler? AudioStateChanged;
+
+    /// <summary><see cref="IsLoading"/> changed: a navigation started, or the latest one ended.</summary>
+    event EventHandler? LoadingChanged;
 
     event EventHandler? TitleChanged;
 
