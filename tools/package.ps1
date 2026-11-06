@@ -1,4 +1,22 @@
-param([string]$Version = '0.1.8', [switch]$SkipLaunchVerification)
+<#
+.SYNOPSIS
+Builds the x64 release ZIP and verifies it.
+
+.DESCRIPTION
+Publishes Release, merges the managed assemblies into Brezza.exe, adds LICENSE.txt and the WebView2
+SDK license as THIRD-PARTY-NOTICES.txt, writes dist/Brezza-<version>-win-x64-native.zip and its
+checksum file, then extracts it and checks that it starts with native controls and a WebView2 surface.
+
+.PARAMETER Version
+The semver in the archive name.
+
+.PARAMETER SkipLaunchVerification
+Skips the launch check, which needs an interactive desktop and no other Brezza window.
+#>
+param(
+    [string]$Version = '0.1.8',
+    [switch]$SkipLaunchVerification
+)
 
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
@@ -31,6 +49,7 @@ try {
         'BrowserUi\locales\zh-Hans.json',
         'BrowserUi\locales\zh-Hant.json'
     )
+    if (-not (Test-Path (Join-Path $projectRoot 'LICENSE'))) { throw 'The repository LICENSE is missing.' }
     foreach ($relativePath in $required) {
         if (-not (Test-Path (Join-Path $stageRoot $relativePath))) { throw "Publish output is missing $relativePath." }
     }
@@ -81,6 +100,30 @@ try {
     foreach ($unused in @('Microsoft.Web.WebView2.Wpf.dll', 'Microsoft.Web.WebView2.WinForms.dll')) {
         if (Test-Path (Join-Path $stageRoot $unused)) { throw "The package still contains $unused." }
     }
+
+    # Brezza's own license, and the WebView2 SDK's license and notices: the SDK's license requires a
+    # binary redistribution to reproduce them, and Brezza.exe contains its merged interop assembly.
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination (Join-Path $stageRoot 'LICENSE.txt')
+    # The notices come from the exact SDK version the lock file pins, the one that was published.
+    $lock = Get-Content -LiteralPath (Join-Path $projectRoot 'src\Brezza.WebView2\packages.lock.json') -Raw | ConvertFrom-Json
+    $webView2Version = $lock.dependencies.'.NETFramework,Version=v4.8'.'Microsoft.Web.WebView2'.resolved
+    $packagesRoot = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path $env:USERPROFILE '.nuget\packages' }
+    $webView2Package = Get-Item -LiteralPath (Join-Path $packagesRoot "microsoft.web.webview2\$webView2Version") -ErrorAction SilentlyContinue
+    if ($null -eq $webView2Package -or -not (Test-Path (Join-Path $webView2Package.FullName 'LICENSE.txt'))) {
+        throw "The WebView2 SDK $webView2Version license could not be found under $packagesRoot."
+    }
+    $notices = @(
+        'Brezza bundles the Microsoft WebView2 SDK ' + $webView2Package.Name + ' (Microsoft.Web.WebView2.Core, merged into',
+        'Brezza.exe, and WebView2Loader.dll). Its license and notices follow.',
+        '',
+        '===== Microsoft WebView2 SDK license =====',
+        ''
+    ) + (Get-Content -LiteralPath (Join-Path $webView2Package.FullName 'LICENSE.txt')) + @(
+        '',
+        '===== Microsoft WebView2 SDK notices =====',
+        ''
+    ) + (Get-Content -LiteralPath (Join-Path $webView2Package.FullName 'NOTICE.txt'))
+    [System.IO.File]::WriteAllText((Join-Path $stageRoot 'THIRD-PARTY-NOTICES.txt'), ($notices -join "`r`n") + "`r`n")
 
     Compress-Archive -Path (Join-Path $stageRoot '*') -DestinationPath $archivePath -CompressionLevel Optimal
     $checksum = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
